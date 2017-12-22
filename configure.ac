@@ -37,6 +37,11 @@ AC_CANONICAL_HOST
 AC_DEFINE_UNQUOTED(SG_LIB_BUILD_HOST, "${host}", [sg3_utils Build Host])
 
 case "${host}" in
+        *-*-android*)
+		AC_DEFINE_UNQUOTED(SG_ON_ANDROID, 1, [sg3_utils on android])
+		AC_DEFINE_UNQUOTED(SG_LIB_LINUX, 1, [sg3_utils on linux])
+                AC_SUBST([os_cflags], [''])
+                AC_SUBST([os_libs], ['']) ;;
         *-*-linux-gnu*)
 		AC_DEFINE_UNQUOTED(SG_LIB_LINUX, 1, [sg3_utils on linux])
                 AC_SUBST([os_cflags], [''])
@@ -79,6 +84,7 @@ AM_CONDITIONAL(OS_OSF, [echo $host_os | grep '^osf' > /dev/null])
 AM_CONDITIONAL(OS_SOLARIS, [echo $host_os | grep '^solaris' > /dev/null])
 AM_CONDITIONAL(OS_WIN32_MINGW, [echo $host_os | grep '^mingw' > /dev/null])
 AM_CONDITIONAL(OS_WIN32_CYGWIN, [echo $host_os | grep '^cygwin' > /dev/null])
+AM_CONDITIONAL(OS_ANDROID, [echo $host_os | grep 'android' > /dev/null])
 
 AC_ARG_ENABLE([linuxbsg],
   AC_HELP_STRING([--disable-linuxbsg], [ignore linux bsg (sgv4) if present]),

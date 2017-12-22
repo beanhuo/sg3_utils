@@ -86,7 +86,11 @@ sg_modes_LDADD = ../lib/libsgutils2.la @os_libs@
 
 sg_opcodes_LDADD = ../lib/libsgutils2.la @os_libs@
 
+if OS_ANDROID
+sgp_dd_LDADD = ../lib/libsgutils2.la @os_libs@
+else
 sgp_dd_LDADD = ../lib/libsgutils2.la @os_libs@ -lpthread
+endif
 
 sg_persist_LDADD = ../lib/libsgutils2.la @os_libs@
 
