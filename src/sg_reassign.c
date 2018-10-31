@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005-2017 Douglas Gilbert.
+ * Copyright (c) 2005-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -21,6 +21,7 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_cmds_basic.h"
 #include "sg_cmds_extra.h"
@@ -36,7 +37,7 @@
  * vendor specific data is written.
  */
 
-static const char * version_str = "1.22 20171008";
+static const char * version_str = "1.26 20180523";
 
 #define DEF_DEFECT_LIST_FORMAT 4        /* bytes from index */
 
@@ -103,7 +104,7 @@ usage()
  * (single) space) separated list) or from stdin (one per line, comma
  * separated list or space separated list). Assumed decimal unless prefixed
  * by '0x', '0X' or contains trailing 'h' or 'H' (which indicate hex).
- * Returns 0 if ok, or 1 if error. */
+ * Returns 0 if ok, or error code. */
 static int
 build_lba_arr(const char * inp, uint64_t * lba_arr,
               int * lba_arr_len, int max_arr_len)
@@ -116,7 +117,7 @@ build_lba_arr(const char * inp, uint64_t * lba_arr,
 
     if ((NULL == inp) || (NULL == lba_arr) ||
         (NULL == lba_arr_len))
-        return 1;
+        return SG_LIB_LOGIC_ERROR;
     lcp = inp;
     in_len = strlen(inp);
     if (0 == in_len)
@@ -148,16 +149,16 @@ build_lba_arr(const char * inp, uint64_t * lba_arr,
                 continue;
             k = strspn(lcp, "0123456789aAbBcCdDeEfFhHxX ,\t");
             if ((k < in_len) && ('#' != lcp[k])) {
-                pr2serr("build_lba_arr: syntax error at line %d, pos %d\n",
+                pr2serr("%s: syntax error at line %d, pos %d\n", __func__,
                         j + 1, m + k + 1);
-                return 1;
+                return SG_LIB_SYNTAX_ERROR;
             }
             for (k = 0; k < 1024; ++k) {
                 ll = sg_get_llnum_nomult(lcp);
                 if (-1 != ll) {
                     if ((off + k) >= max_arr_len) {
-                        pr2serr("build_lba_arr: array length exceeded\n");
-                        return 1;
+                        pr2serr("%s: array length exceeded\n", __func__);
+                        return SG_LIB_SYNTAX_ERROR;
                     }
                     lba_arr[off + k] = (uint64_t)ll;
                     lcp = strpbrk(lcp, " ,\t");
@@ -171,9 +172,9 @@ build_lba_arr(const char * inp, uint64_t * lba_arr,
                         --k;
                         break;
                     }
-                    pr2serr("build_lba_arr: error in line %d, at pos %d\n",
+                    pr2serr("%s: error in line %d, at pos %d\n", __func__,
                             j + 1, (int)(lcp - line + 1));
-                    return 1;
+                    return SG_LIB_SYNTAX_ERROR;
                 }
             }
             off += (k + 1);
@@ -182,8 +183,8 @@ build_lba_arr(const char * inp, uint64_t * lba_arr,
     } else {        /* list of numbers (default decimal) on command line */
         k = strspn(inp, "0123456789aAbBcCdDeEfFhHxX, ");
         if (in_len != k) {
-            pr2serr("build_lba_arr: error at pos %d\n", k + 1);
-            return 1;
+            pr2serr("%s: error at pos %d\n", __func__, k + 1);
+            return SG_LIB_SYNTAX_ERROR;
         }
         for (k = 0; k < max_arr_len; ++k) {
             ll = sg_get_llnum_nomult(lcp);
@@ -199,15 +200,15 @@ build_lba_arr(const char * inp, uint64_t * lba_arr,
                     cp = c2p;
                 lcp = cp + 1;
             } else {
-                pr2serr("build_lba_arr: error at pos %d\n",
+                pr2serr("%s: error at pos %d\n", __func__,
                         (int)(lcp - inp + 1));
-                return 1;
+                return SG_LIB_SYNTAX_ERROR;
             }
         }
         *lba_arr_len = k + 1;
         if (k == max_arr_len) {
-            pr2serr("build_lba_arr: array length exceeded\n");
-            return 1;
+            pr2serr("%s: array length exceeded\n", __func__);
+            return SG_LIB_SYNTAX_ERROR;
         }
     }
     return 0;
@@ -224,13 +225,16 @@ main(int argc, char * argv[])
     bool longlist = false;
     bool primary = false;
     bool grown = false;
-    int sg_fd, res, c, num, k, j;
+    bool verbose_given = false;
+    bool version_given = false;
+    int res, c, num, k, j;
+    int sg_fd = -1;
     int addr_arr_len = 0;
     int do_hex = 0;
     int verbose = 0;
     const char * device_name = NULL;
     uint64_t addr_arr[MAX_NUM_ADDR];
-    unsigned char param_arr[4 + (MAX_NUM_ADDR * 8)];
+    uint8_t param_arr[4 + (MAX_NUM_ADDR * 8)];
     char b[80];
     int param_len = 4;
     int ret = 0;
@@ -246,10 +250,10 @@ main(int argc, char * argv[])
         switch (c) {
         case 'a':
             memset(addr_arr, 0, sizeof(addr_arr));
-            if (0 != build_lba_arr(optarg, addr_arr, &addr_arr_len,
-                                   MAX_NUM_ADDR)) {
+            if ((res = build_lba_arr(optarg, addr_arr, &addr_arr_len,
+                                     MAX_NUM_ADDR))) {
                 pr2serr("bad argument to '--address'\n");
-                return SG_LIB_SYNTAX_ERROR;
+                return res;
             }
             got_addr = true;
             break;
@@ -289,11 +293,12 @@ main(int argc, char * argv[])
             primary = true;
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr("version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
             usage();
@@ -312,8 +317,29 @@ main(int argc, char * argv[])
             return SG_LIB_SYNTAX_ERROR;
         }
     }
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr("version: %s\n", version_str);
+        return 0;
+    }
+
     if (NULL == device_name) {
-        pr2serr("missing device name!\n");
+        pr2serr("Missing device name!\n\n");
         usage();
         return SG_LIB_SYNTAX_ERROR;
     }
@@ -321,7 +347,7 @@ main(int argc, char * argv[])
         if (got_addr) {
             pr2serr("can't have '--address=' with '--grown' or '--primary'\n");
             usage();
-            return SG_LIB_SYNTAX_ERROR;
+            return SG_LIB_CONTRADICT;
         }
     } else if ((! got_addr) || (addr_arr_len < 1)) {
         pr2serr("need at least one address (see '--address=')\n");
@@ -337,7 +363,7 @@ main(int argc, char * argv[])
                 } else if (! eight) {
                     pr2serr("address number %d exceeds 32 bits so "
                             "'--eight=0' invalid\n", k + 1);
-                    return SG_LIB_SYNTAX_ERROR;
+                    return SG_LIB_CONTRADICT;
                 }
             }
         }
@@ -364,8 +390,11 @@ main(int argc, char * argv[])
 
     sg_fd = sg_cmds_open_device(device_name, false /* rw */, verbose);
     if (sg_fd < 0) {
-        pr2serr("open error: %s: %s\n", device_name, safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        if (verbose)
+            pr2serr("open error: %s: %s\n", device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
+        goto err_out;
     }
 
     if (got_addr) {
@@ -404,7 +433,7 @@ main(int argc, char * argv[])
             goto err_out;
         }
         if (do_hex) {
-            dStrHex((const char *)param_arr, param_len, 1);
+            hex2stdout(param_arr, param_len, 1);
             goto err_out;       /* ret is zero */
         }
         got_grown = !!(param_arr[1] & 0x8);
@@ -456,11 +485,18 @@ main(int argc, char * argv[])
     }
 
 err_out:
-    res = sg_cmds_close_device(sg_fd);
-    if (res < 0) {
-        pr2serr("close error: %s\n", safe_strerror(-res));
-        if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+    if (sg_fd >= 0) {
+        res = sg_cmds_close_device(sg_fd);
+        if (res < 0) {
+            pr2serr("close error: %s\n", safe_strerror(-res));
+            if (0 == ret)
+                ret = sg_convert_errno(-res);
+        }
+    }
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_reassign failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

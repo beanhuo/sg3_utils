@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017 Douglas Gilbert.
+ * Copyright (c) 2016-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -33,7 +33,7 @@
  * device. Based on sbc4r10.pdf .
  */
 
-static const char * version_str = "1.02 20171008";
+static const char * version_str = "1.09 20180625";
 
 #define BACKGROUND_CONTROL_SA 0x15
 
@@ -88,10 +88,10 @@ sg_ll_background_control(int sg_fd, unsigned int bo_ctl, unsigned int bo_time,
                          bool noisy, int verbose)
 {
     int k, ret, res, sense_cat;
-    unsigned char bcCDB[16] = {SG_SERVICE_ACTION_IN_16,
+    uint8_t bcCDB[16] = {SG_SERVICE_ACTION_IN_16,
            BACKGROUND_CONTROL_SA, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,
            0, 0, 0, 0};
-    unsigned char sense_b[SENSE_BUFF_LEN];
+    uint8_t sense_b[SENSE_BUFF_LEN];
     struct sg_pt_base * ptvp;
 
     if (bo_ctl)
@@ -116,7 +116,7 @@ sg_ll_background_control(int sg_fd, unsigned int bo_ctl, unsigned int bo_time,
     ret = sg_cmds_process_resp(ptvp, cmd_name, res, SG_NO_DATA_IN, sense_b,
                                noisy, verbose, &sense_cat);
     if (-1 == ret)
-        ;
+        ret = sg_convert_errno(get_scsi_pt_os_err(ptvp));
     else if (-2 == ret) {
         switch (sense_cat) {
         case SG_LIB_CAT_RECOVERED:
@@ -137,7 +137,10 @@ sg_ll_background_control(int sg_fd, unsigned int bo_ctl, unsigned int bo_time,
 int
 main(int argc, char * argv[])
 {
-    int sg_fd, res, c;
+    bool verbose_given = false;
+    bool version_given = false;
+    int sg_fd = -1;
+    int res, c;
     unsigned int ctl = 0;
     unsigned int time_tnth = 0;
     int verbose = 0;
@@ -170,11 +173,12 @@ main(int argc, char * argv[])
             }
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr("version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
             usage();
@@ -194,18 +198,40 @@ main(int argc, char * argv[])
             return SG_LIB_SYNTAX_ERROR;
         }
     }
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr("version: %s\n", version_str);
+        return 0;
+    }
 
     if (NULL == device_name) {
-        pr2serr("missing device name!\n");
+        pr2serr("missing device name!\n\n");
         usage();
         return SG_LIB_SYNTAX_ERROR;
     }
 
     sg_fd = sg_cmds_open_device(device_name, false, verbose);
     if (sg_fd < 0) {
-        pr2serr("open error: %s: %s\n", device_name,
-                safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        if (verbose)
+            pr2serr("open error: %s: %s\n", device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
+        goto fini;
     }
 
     res = sg_ll_background_control(sg_fd, ctl, time_tnth, true, verbose);
@@ -221,11 +247,19 @@ main(int argc, char * argv[])
         }
     }
 
-    res = sg_cmds_close_device(sg_fd);
-    if (res < 0) {
-        pr2serr("close error: %s\n", safe_strerror(-res));
-        if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+fini:
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_bg_ctl failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' or '-vv' for "
+                    "more information\n");
+    }
+    if (sg_fd >= 0) {
+        res = sg_cmds_close_device(sg_fd);
+        if (res < 0) {
+            pr2serr("close error: %s\n", safe_strerror(-res));
+            if (0 == ret)
+                ret = sg_convert_errno(-res);
+        }
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

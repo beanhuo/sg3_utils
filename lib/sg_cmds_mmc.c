@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2017 Douglas Gilbert.
+ * Copyright (c) 2008-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -13,15 +13,16 @@
 #define __STDC_FORMAT_MACROS 1
 #include <inttypes.h>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "sg_lib.h"
 #include "sg_cmds_basic.h"
 #include "sg_cmds_mmc.h"
 #include "sg_pt.h"
 #include "sg_unaligned.h"
-
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
+#include "sg_pr2serr.h"
 
 
 #define SENSE_BUFF_LEN 64       /* Arbitrary, could be larger */
@@ -37,25 +38,6 @@
 #define SET_STREAMING_CMD 0xb6
 #define SET_STREAMING_CMDLEN 12
 
-#if defined(__GNUC__) || defined(__clang__)
-static int pr2ws(const char * fmt, ...)
-        __attribute__ ((format (printf, 1, 2)));
-#else
-static int pr2ws(const char * fmt, ...);
-#endif
-
-
-static int
-pr2ws(const char * fmt, ...)
-{
-    va_list args;
-    int n;
-
-    va_start(args, fmt);
-    n = vfprintf(sg_warnings_strm ? sg_warnings_strm : stderr, fmt, args);
-    va_end(args);
-    return n;
-}
 
 static struct sg_pt_base *
 create_pt_obj(const char * cname)
@@ -77,9 +59,9 @@ sg_ll_set_cd_speed(int sg_fd, int rot_control, int drv_read_speed,
 {
     static const char * const cdb_name_s = "set cd speed";
     int res, ret, k, sense_cat;
-    unsigned char scsCmdBlk[SET_CD_SPEED_CMDLEN] = {SET_CD_SPEED_CMD, 0,
+    uint8_t scsCmdBlk[SET_CD_SPEED_CMDLEN] = {SET_CD_SPEED_CMD, 0,
                                          0, 0, 0, 0, 0, 0, 0, 0, 0 ,0};
-    unsigned char sense_b[SENSE_BUFF_LEN];
+    uint8_t sense_b[SENSE_BUFF_LEN];
     struct sg_pt_base * ptvp;
 
     scsCmdBlk[1] |= (rot_control & 0x3);
@@ -100,7 +82,7 @@ sg_ll_set_cd_speed(int sg_fd, int rot_control, int drv_read_speed,
     ret = sg_cmds_process_resp(ptvp, cdb_name_s, res, SG_NO_DATA_IN, sense_b,
                                noisy, verbose, &sense_cat);
     if (-1 == ret)
-        ;
+        ret = sg_convert_errno(get_scsi_pt_os_err(ptvp));
     else if (-2 == ret) {
         switch (sense_cat) {
         case SG_LIB_CAT_NOT_READY:
@@ -135,9 +117,9 @@ sg_ll_get_config(int sg_fd, int rt, int starting, void * resp,
 {
     static const char * const cdb_name_s = "get configuration";
     int res, k, ret, sense_cat;
-    unsigned char gcCmdBlk[GET_CONFIG_CMD_LEN] = {GET_CONFIG_CMD, 0, 0, 0,
+    uint8_t gcCmdBlk[GET_CONFIG_CMD_LEN] = {GET_CONFIG_CMD, 0, 0, 0,
                                                   0, 0, 0, 0, 0, 0};
-    unsigned char sense_b[SENSE_BUFF_LEN];
+    uint8_t sense_b[SENSE_BUFF_LEN];
     struct sg_pt_base * ptvp;
 
     if ((rt < 0) || (rt > 3)) {
@@ -167,12 +149,12 @@ sg_ll_get_config(int sg_fd, int rt, int starting, void * resp,
         return -1;
     set_scsi_pt_cdb(ptvp, gcCmdBlk, sizeof(gcCmdBlk));
     set_scsi_pt_sense(ptvp, sense_b, sizeof(sense_b));
-    set_scsi_pt_data_in(ptvp, (unsigned char *)resp, mx_resp_len);
+    set_scsi_pt_data_in(ptvp, (uint8_t *)resp, mx_resp_len);
     res = do_scsi_pt(ptvp, sg_fd, DEF_PT_TIMEOUT, verbose);
     ret = sg_cmds_process_resp(ptvp, cdb_name_s, res, mx_resp_len,
                                sense_b, noisy, verbose, &sense_cat);
     if (-1 == ret)
-        ;
+        ret = sg_convert_errno(get_scsi_pt_os_err(ptvp));
     else if (-2 == ret) {
         switch (sense_cat) {
         case SG_LIB_CAT_INVALID_OP:
@@ -191,10 +173,10 @@ sg_ll_get_config(int sg_fd, int rt, int starting, void * resp,
         }
     } else {
         if ((verbose > 2) && (ret > 3)) {
-            unsigned char * bp;
+            uint8_t * bp;
             int len;
 
-            bp = (unsigned char *)resp;
+            bp = (uint8_t *)resp;
             len = sg_get_unaligned_be32(bp + 0);
             if (len < 0)
                 len = 0;
@@ -202,10 +184,11 @@ sg_ll_get_config(int sg_fd, int rt, int starting, void * resp,
             pr2ws("    %s: response:\n", cdb_name_s);
             if (3 == verbose) {
                 pr2ws("%s:\n", (len > 256 ? ", first 256 bytes" : ""));
-                dStrHexErr((const char *)resp, (len > 256 ? 256 : len), -1);
+                hex2stderr((const uint8_t *)resp, (len > 256 ? 256 : len),
+                           -1);
             } else {
                 pr2ws(":\n");
-                dStrHexErr((const char *)resp, len, 0);
+                hex2stderr((const uint8_t *)resp, len, 0);
             }
         }
         ret = 0;
@@ -225,9 +208,9 @@ sg_ll_get_performance(int sg_fd, int data_type, unsigned int starting_lba,
 {
     static const char * const cdb_name_s = "get performance";
     int res, k, ret, sense_cat;
-    unsigned char gpCmdBlk[GET_PERFORMANCE_CMD_LEN] = {GET_PERFORMANCE_CMD, 0,
+    uint8_t gpCmdBlk[GET_PERFORMANCE_CMD_LEN] = {GET_PERFORMANCE_CMD, 0,
                                         0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-    unsigned char sense_b[SENSE_BUFF_LEN];
+    uint8_t sense_b[SENSE_BUFF_LEN];
     struct sg_pt_base * ptvp;
 
     if ((data_type < 0) || (data_type > 0x1f)) {
@@ -245,7 +228,7 @@ sg_ll_get_performance(int sg_fd, int data_type, unsigned int starting_lba,
         pr2ws("Bad type: 0x%x\n", ttype);
         return -1;
     }
-    gpCmdBlk[10] = (unsigned char)ttype;
+    gpCmdBlk[10] = (uint8_t)ttype;
 
     if (verbose) {
         pr2ws("    %s cdb: ", cdb_name_s);
@@ -258,12 +241,12 @@ sg_ll_get_performance(int sg_fd, int data_type, unsigned int starting_lba,
         return -1;
     set_scsi_pt_cdb(ptvp, gpCmdBlk, sizeof(gpCmdBlk));
     set_scsi_pt_sense(ptvp, sense_b, sizeof(sense_b));
-    set_scsi_pt_data_in(ptvp, (unsigned char *)resp, mx_resp_len);
+    set_scsi_pt_data_in(ptvp, (uint8_t *)resp, mx_resp_len);
     res = do_scsi_pt(ptvp, sg_fd, DEF_PT_TIMEOUT, verbose);
     ret = sg_cmds_process_resp(ptvp, cdb_name_s, res, mx_resp_len, sense_b,
                                noisy, verbose, &sense_cat);
     if (-1 == ret)
-        ;
+        ret = sg_convert_errno(get_scsi_pt_os_err(ptvp));
     else if (-2 == ret) {
         switch (sense_cat) {
         case SG_LIB_CAT_INVALID_OP:
@@ -282,10 +265,10 @@ sg_ll_get_performance(int sg_fd, int data_type, unsigned int starting_lba,
         }
     } else {
         if ((verbose > 2) && (ret > 3)) {
-            unsigned char * bp;
+            uint8_t * bp;
             int len;
 
-            bp = (unsigned char *)resp;
+            bp = (uint8_t *)resp;
             len = sg_get_unaligned_be32(bp + 0);
             if (len < 0)
                 len = 0;
@@ -293,10 +276,11 @@ sg_ll_get_performance(int sg_fd, int data_type, unsigned int starting_lba,
             pr2ws("    %s: response", cdb_name_s);
             if (3 == verbose) {
                 pr2ws("%s:\n", (len > 256 ? ", first 256 bytes" : ""));
-                dStrHexErr((const char *)resp, (len > 256 ? 256 : len), -1);
+                hex2stderr((const uint8_t *)resp, (len > 256 ? 256 : len),
+                           -1);
             } else {
                 pr2ws(":\n");
-                dStrHexErr((const char *)resp, len, 0);
+                hex2stderr((const uint8_t *)resp, len, 0);
             }
         }
         ret = 0;
@@ -316,9 +300,9 @@ sg_ll_set_streaming(int sg_fd, int type, void * paramp, int param_len,
 {
     static const char * const cdb_name_s = "set streaming";
     int k, res, ret, sense_cat;
-    unsigned char ssCmdBlk[SET_STREAMING_CMDLEN] =
+    uint8_t ssCmdBlk[SET_STREAMING_CMDLEN] =
                  {SET_STREAMING_CMD, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-    unsigned char sense_b[SENSE_BUFF_LEN];
+    uint8_t sense_b[SENSE_BUFF_LEN];
     struct sg_pt_base * ptvp;
 
     ssCmdBlk[8] = type;
@@ -330,7 +314,7 @@ sg_ll_set_streaming(int sg_fd, int type, void * paramp, int param_len,
         pr2ws("\n");
         if ((verbose > 1) && paramp && param_len) {
             pr2ws("    %s parameter list:\n", cdb_name_s);
-            dStrHexErr((const char *)paramp, param_len, -1);
+            hex2stderr((const uint8_t *)paramp, param_len, -1);
         }
     }
 
@@ -338,12 +322,12 @@ sg_ll_set_streaming(int sg_fd, int type, void * paramp, int param_len,
         return -1;
     set_scsi_pt_cdb(ptvp, ssCmdBlk, sizeof(ssCmdBlk));
     set_scsi_pt_sense(ptvp, sense_b, sizeof(sense_b));
-    set_scsi_pt_data_out(ptvp, (unsigned char *)paramp, param_len);
+    set_scsi_pt_data_out(ptvp, (uint8_t *)paramp, param_len);
     res = do_scsi_pt(ptvp, sg_fd, DEF_PT_TIMEOUT, verbose);
     ret = sg_cmds_process_resp(ptvp, cdb_name_s, res, SG_NO_DATA_IN, sense_b,
                                noisy, verbose, &sense_cat);
     if (-1 == ret)
-        ;
+        ret = sg_convert_errno(get_scsi_pt_os_err(ptvp));
     else if (-2 == ret) {
         switch (sense_cat) {
         case SG_LIB_CAT_NOT_READY:

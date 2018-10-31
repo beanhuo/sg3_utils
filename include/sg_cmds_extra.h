@@ -2,7 +2,7 @@
 #define SG_CMDS_EXTRA_H
 
 /*
- * Copyright (c) 2004-2017 Douglas Gilbert.
+ * Copyright (c) 2004-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -21,6 +21,15 @@ extern "C" {
  * aborted and there can be other unwelcome side effects. Note that some
  * commands (e.g. FORMAT UNIT and the Third Party copy commands) can take
  * a lot longer than the default timeout. */
+
+/* Functions with the "_pt" suffix ^^^ take a pointer to an object (derived
+ * from) sg_pt_base rather than an open file descriptor as their first
+ * argument. That object is assumed to be constructed and have a device file
+ * descriptor * associated with it. Caller is responsible for lifetime of
+ * ptp.
+ *    ^^^ apart from sg_ll_ata_pt() as 'pass-through' is part of its name. */
+
+struct sg_pt_base;
 
 
 /* Invokes a ATA PASS-THROUGH (12, 16 or 32) SCSI command (SAT). This is
@@ -42,17 +51,17 @@ extern "C" {
  * data may be placed in *sensep in which case sensep[0]==0x70, prior to
  * SAT-2 descriptor sense format was required (i.e. sensep[0]==0x72).
  */
-int sg_ll_ata_pt(int sg_fd, const unsigned char * cdbp, int cdb_len,
+int sg_ll_ata_pt(int sg_fd, const uint8_t * cdbp, int cdb_len,
                  int timeout_secs,  void * dinp, void * doutp, int dlen,
-                 unsigned char * sensep, int max_sense_len,
-                 unsigned char * ata_return_dp, int max_ata_return_len,
-                 int * residp, int verbose);
+                 uint8_t * sensep, int max_sense_len, uint8_t * ata_return_dp,
+                 int max_ata_return_len, int * residp, int verbose);
 
 /* Invokes a FORMAT UNIT (SBC-3) command. Return of 0 -> success,
  * SG_LIB_CAT_INVALID_OP -> Format unit not supported,
  * SG_LIB_CAT_ILLEGAL_REQ -> bad field in cdb, SG_LIB_CAT_UNIT_ATTENTION,
  * SG_LIB_CAT_NOT_READY -> device not ready, SG_LIB_CAT_ABORTED_COMMAND,
- * -1 -> other failure */
+ * -1 -> other failure. Note that sg_ll_format_unit2() and
+ * sg_ll_format_unit_v2() are the same, both add the ffmt argument. */
 int sg_ll_format_unit(int sg_fd, int fmtpinfo, bool longlist, bool fmtdata,
                       bool cmplist, int dlist_format, int timeout_secs,
                       void * paramp, int param_len, bool noisy, int verbose);
@@ -60,6 +69,10 @@ int sg_ll_format_unit2(int sg_fd, int fmtpinfo, bool longlist, bool fmtdata,
                        bool cmplist, int dlist_format, int ffmt,
                        int timeout_secs, void * paramp, int param_len,
                        bool noisy, int verbose);
+int sg_ll_format_unit_v2(int sg_fd, int fmtpinfo, bool longlist, bool fmtdata,
+                         bool cmplist, int dlist_format, int ffmt,
+                         int timeout_secs, void * paramp, int param_len,
+                         bool noisy, int verbose);
 
 /* Invokes a SCSI GET LBA STATUS(16) or GET LBA STATUS(32) command (SBC).
  * Returns 0 -> success,
@@ -167,7 +180,7 @@ int sg_ll_receive_diag(int sg_fd, bool pcv, int pg_code, void * resp,
 /* Same as sg_ll_receive_diag() but with added timeout_secs and residp
  * arguments. Adds the ability to set the command abort timeout
  * and the ability to report the residual count. If timeout_secs is zero
- * or less the the default command abort timeout (60 seconds) is used.
+ * or less the default command abort timeout (60 seconds) is used.
  * If residp is non-NULL then the residual value is written where residp
  * points. A residual value of 0 implies mx_resp_len bytes have be written
  * where resp points. If the residual value equals mx_resp_len then no
@@ -175,6 +188,10 @@ int sg_ll_receive_diag(int sg_fd, bool pcv, int pg_code, void * resp,
 int sg_ll_receive_diag_v2(int sg_fd, bool pcv, int pg_code, void * resp,
                           int mx_resp_len, int timeout_secs, int * residp,
                           bool noisy, int verbose);
+
+int sg_ll_receive_diag_pt(struct sg_pt_base * ptp, bool pcv, int pg_code,
+                          void * resp, int mx_resp_len, int timeout_secs,
+                          int * residp, bool noisy, int verbose);
 
 /* Invokes a SCSI REPORT IDENTIFYING INFORMATION command. This command was
  * called REPORT DEVICE IDENTIFIER prior to spc4r07. Return of 0 -> success,
@@ -210,16 +227,21 @@ int sg_ll_report_referrals(int sg_fd, uint64_t start_llba, bool one_seg,
                            int verbose);
 
 /* Invokes a SCSI SEND DIAGNOSTIC command. Foreground, extended self tests can
- * take a long time, if so set long_duration flag in which case the timout
+ * take a long time, if so set long_duration flag in which case the timeout
  * is set to 7200 seconds; if the value of long_duration is > 7200 then that
  * value is taken as the timeout value in seconds. Return of 0 -> success,
  * SG_LIB_CAT_INVALID_OP -> Send diagnostic not supported,
  * SG_LIB_CAT_ILLEGAL_REQ -> bad field in cdb, SG_LIB_CAT_UNIT_ATTENTION,
  * SG_LIB_CAT_NOT_READY -> device not ready, SG_LIB_CAT_ABORTED_COMMAND,
  * -1 -> other failure */
-int sg_ll_send_diag(int sg_fd, int sf_code, bool pf_bit, bool sf_bit,
+int sg_ll_send_diag(int sg_fd, int st_code, bool pf_bit, bool st_bit,
                     bool devofl_bit, bool unitofl_bit, int long_duration,
                     void * paramp, int param_len, bool noisy, int verbose);
+
+int sg_ll_send_diag_pt(struct sg_pt_base * ptp, int st_code, bool pf_bit,
+                       bool st_bit, bool devofl_bit, bool unitofl_bit,
+                       int long_duration, void * paramp, int param_len,
+                       bool noisy, int verbose);
 
 /* Invokes a SCSI SET IDENTIFYING INFORMATION command. This command was
  * called SET DEVICE IDENTIFIER prior to spc4r07. Return of 0 -> success,
@@ -343,6 +365,19 @@ int sg_ll_extended_copy(int sg_fd, void * paramp, int param_len, bool noisy,
 int sg_ll_3party_copy_out(int sg_fd, int sa, unsigned int list_id,
                           int group_num, int timeout_secs, void * paramp,
                           int param_len, bool noisy, int verbose);
+
+/* Invokes a SCSI PRE-FETCH(10), PRE-FETCH(16) or SEEK(10) command (SBC).
+ * Returns 0 -> success, 25 (SG_LIB_CAT_CONDITION_MET), various SG_LIB_CAT_*
+ * positive values or -1 -> other errors. Note that CONDITION MET status
+ * is returned when immed=true and num_blocks can fit in device's cache,
+ * somewaht strangely, GOOD status (return 0) is returned if num_blocks
+ * cannot fit in device's cache. If do_seek10==true then does a SEEK(10)
+ * command with given lba, if that LBA is < 2**32 . Unclear what SEEK(10)
+ * does, assume it is like PRE-FETCH. If timeout_secs is 0 (or less) then
+ * use DEF_PT_TIMEOUT (60 seconds) as command timeout. */
+int sg_ll_pre_fetch_x(int sg_fd, bool do_seek10, bool cdb16, bool immed,
+                      uint64_t lba, uint32_t num_blocks, int group_num,
+                      int timeout_secs, bool noisy, int verbose);
 
 #ifdef __cplusplus
 }

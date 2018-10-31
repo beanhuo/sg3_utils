@@ -6,7 +6,7 @@
  *
  * Copyright (C) 2003  Grant Grundler    grundler at parisc-linux dot org
  * Copyright (C) 2003  James Bottomley       jejb at parisc-linux dot org
- * Copyright (C) 2005-2017  Douglas Gilbert   dgilbert at interlog dot com
+ * Copyright (C) 2005-2018  Douglas Gilbert   dgilbert at interlog dot com
  *
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -22,6 +22,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <string.h>
+#include <errno.h>
 #include <getopt.h>
 #include <unistd.h>
 #define __STDC_FORMAT_MACROS 1
@@ -37,14 +38,17 @@
 #include "sg_pr2serr.h"
 #include "sg_pt.h"
 
-static const char * version_str = "1.40 20171030";
+static const char * version_str = "1.52 20180723";
 
 
 #define RW_ERROR_RECOVERY_PAGE 1  /* can give alternate with --mode=MP */
 
 #define SHORT_TIMEOUT           20   /* 20 seconds unless --wait given */
 #define FORMAT_TIMEOUT          (20 * 3600)       /* 20 hours ! */
-/* Seagate ST32000444SS 2TB disk takes 9.5 hours, now there are 4TB disks */
+#define FOUR_TBYTE      (4LL * 1000 * 1000 * 1000 * 1000)
+#define LONG_FORMAT_TIMEOUT     (40 * 3600)       /* 40 hours */
+#define EIGHT_TBYTE     (FOUR_TBYTE * 2)
+#define VLONG_FORMAT_TIMEOUT    (80 * 3600)       /* 3 days, 8 hours */
 
 #define POLL_DURATION_SECS 60
 #define DEF_POLL_TYPE_RS false     /* false -> test unit ready;
@@ -69,6 +73,7 @@ static const char * version_str = "1.40 20171030";
 struct opts_t {
         bool cmplst;             /* -C value */
         bool dcrt;              /* -D */
+        bool dry_run;           /* -d */
         bool early;             /* -e */
         bool fwait;             /* -w (negate for immed) */
         bool ip_def;            /* -I */
@@ -81,7 +86,9 @@ struct opts_t {
         bool do_rcap16;         /* -l */
         bool resize;            /* -r */
         bool rto_req;           /* -R, deprecated, prefer fmtpinfo */
+        bool verbose_given;
         bool verify;            /* -y */
+        bool version_given;
         int blk_size;           /* -s value */
         int ffmt;               /* -t value */
         int fmtpinfo;
@@ -91,25 +98,29 @@ struct opts_t {
         int pie;                /* -q value */
         int sec_init;           /* -S */
         int tape;               /* -T <format>, def: -1 */
-        int timeout;            /* -m SEC, def: depends on IMMED bit */
+        int timeout;            /* -m SECS, def: depends on IMMED bit */
         int verbose;            /* -v */
         int64_t blk_count;      /* -c value */
+        int64_t total_byte_count;      /* from READ CAPACITY command */
         const char * device_name;
 };
 
 #define MAX_BUFF_SZ     252
-static unsigned char dbuff[MAX_BUFF_SZ];
+static uint8_t dbuff[MAX_BUFF_SZ];
 
 
 static struct option long_options[] = {
         {"count", required_argument, 0, 'c'},
         {"cmplst", required_argument, 0, 'C'},
         {"dcrt", no_argument, 0, 'D'},
+        {"dry-run", no_argument, 0, 'd'},
+        {"dry_run", no_argument, 0, 'd'},
         {"early", no_argument, 0, 'e'},
         {"ffmt", required_argument, 0, 't'},
         {"fmtpinfo", required_argument, 0, 'f'},
         {"format", no_argument, 0, 'F'},
         {"help", no_argument, 0, 'h'},
+        {"ip-def", no_argument, 0, 'I'},
         {"ip_def", no_argument, 0, 'I'},
         {"long", no_argument, 0, 'l'},
         {"mode", required_argument, 0, 'M'},
@@ -136,19 +147,18 @@ static struct option long_options[] = {
 static void
 usage()
 {
-        printf("usage: sg_format [--cmplst=0|1] [--count=COUNT] [--dcrt] "
-               "[--early]\n"
-               "                 [--ffmt=FFMT] [--fmtpinfo=FPI] [--format] "
-               "[--help]\n"
-               "                 [--ip_def] [--long] [--mode=MP] [--pfu=PFU] "
-               "[--pie=PIE]\n"
-               "                 [--pinfo] [--poll=PT] [--quick] [--resize] "
-               "[--rto_req]\n"
-               "                 [--security] [--six] [--size=SIZE] "
-               "[--tape=FM]\n"
-               "                 [--timeout=SEC] [--verbose] [--verify] "
-               "[--version] [--wait]\n"
-               "                 DEVICE\n"
+        printf("Usage:\n"
+               "  sg_format [--cmplst=0|1] [--count=COUNT] [--dcrt] "
+               "[--dry-run] [--early]\n"
+               "            [--ffmt=FFMT] [--fmtpinfo=FPI] [--format] "
+               "[--help] [--ip-def]\n"
+               "            [--long] [--mode=MP] [--pfu=PFU] [--pie=PIE] "
+               "[--pinfo]\n"
+               "            [--poll=PT] [--quick] [--resize] [--rto_req] "
+               "[--security]\n"
+               "            [--six] [--size=SIZE] [--tape=FM] "
+               "[--timeout=SECS] [--verbose]\n"
+               "            [--verify] [--version] [--wait] DEVICE\n"
                "  where:\n"
                "    --cmplst=0|1\n"
                "      -C 0|1        sets CMPLST bit in format cdb "
@@ -159,11 +169,13 @@ usage()
                "same as current\n"
                "    --dcrt|-D       disable certification (doesn't "
                "verify media)\n"
+               "    --dry-run|-d    bypass device modifying commands (i.e. "
+               "don't format)\n"
                "    --early|-e      exit once format started (user can "
                "monitor progress)\n"
                "    --ffmt=FFMT|-t FFMT      fast format (def: 0 -> "
-               "possibly write\n"
-               "                             to whole medium\n"
+               "possibly overwrite\n"
+               "                             whole medium)\n"
                "    --fmtpinfo=FPI|-f FPI    FMTPINFO field value "
                "(default: 0)\n"
                "    --format|-F     do FORMAT UNIT (default: report current "
@@ -171,7 +183,7 @@ usage()
                "                    use thrice for FORMAT UNIT command "
                "only\n"
                "    --help|-h       prints out this usage message\n"
-               "    --ip_def|-I     use default initialization pattern\n"
+               "    --ip-def|-I     use default initialization pattern\n"
                "    --long|-l       allow for 64 bit lbas (default: assume "
                "32 bit lbas)\n"
                "    --mode=MP|-M MP     mode page (def: 1 -> RW error "
@@ -206,7 +218,7 @@ usage()
                "    --tape=FM|-T FM    request FORMAT MEDIUM with FORMAT "
                "field set\n"
                "                       to FM (def: 0 --> default format)\n"
-               "    --timeout=SEC|-m SEC    FORMAT UNIT/MEDIUM command "
+               "    --timeout=SECS|-m SECS    FORMAT UNIT/MEDIUM command "
                "timeout in seconds\n"
                "    --verbose|-v    increase verbosity\n"
                "    --verify|-y     sets VERIFY bit in FORMAT MEDIUM (tape)\n"
@@ -232,9 +244,9 @@ sg_ll_format_medium(int sg_fd, bool verify, bool immed, int format,
                     int verbose)
 {
         int k, ret, res, sense_cat;
-        unsigned char fm_cdb[SG_FORMAT_MEDIUM_CMDLEN] =
+        uint8_t fm_cdb[SG_FORMAT_MEDIUM_CMDLEN] =
                                   {SG_FORMAT_MEDIUM_CMD, 0, 0, 0, 0, 0};
-        unsigned char sense_b[SENSE_BUFF_LEN];
+        uint8_t sense_b[SENSE_BUFF_LEN];
         struct sg_pt_base * ptvp;
 
         if (verify)
@@ -255,16 +267,16 @@ sg_ll_format_medium(int sg_fd, bool verify, bool immed, int format,
         ptvp = construct_scsi_pt_obj();
         if (NULL == ptvp) {
                 pr2serr("%s: out of memory\n", __func__);
-                return -1;
+                return sg_convert_errno(ENOMEM);
         }
         set_scsi_pt_cdb(ptvp, fm_cdb, sizeof(fm_cdb));
         set_scsi_pt_sense(ptvp, sense_b, sizeof(sense_b));
-        set_scsi_pt_data_out(ptvp, (unsigned char *)paramp, transfer_len);
+        set_scsi_pt_data_out(ptvp, (uint8_t *)paramp, transfer_len);
         res = do_scsi_pt(ptvp, sg_fd, timeout, verbose);
         ret = sg_cmds_process_resp(ptvp, "format medium", res, transfer_len,
                                    sense_b, noisy, verbose, &sense_cat);
         if (-1 == ret)
-                ;
+                ret = sg_convert_errno(get_scsi_pt_os_err(ptvp));
         else if (-2 == ret) {
                 switch (sense_cat) {
                 case SG_LIB_CAT_RECOVERED:
@@ -281,24 +293,31 @@ sg_ll_format_medium(int sg_fd, bool verify, bool immed, int format,
         return ret;
 }
 
-/* Return 0 on success, else see sg_ll_format_unit2() */
+/* Return 0 on success, else see sg_ll_format_unit_v2() */
 static int
 scsi_format_unit(int fd, const struct opts_t * op)
 {
-        bool need_hdr, longlist;
+        bool need_hdr, longlist, ip_desc;
         bool immed = ! op->fwait;
-        bool ip_desc;
-        int res, progress, pr, rem, verb, fmt_pl_sz, off, resp_len;
-        int timeout;
+        int res, progress, pr, rem, verb, fmt_pl_sz, off, resp_len, timeout;
         const int SH_FORMAT_HEADER_SZ = 4;
         const int LO_FORMAT_HEADER_SZ = 8;
-        const char INIT_PATTERN_DESC_SZ = 4;
-        unsigned char fmt_pl[LO_FORMAT_HEADER_SZ + INIT_PATTERN_DESC_SZ];
-        unsigned char reqSense[MAX_BUFF_SZ];
+        const int INIT_PATTERN_DESC_SZ = 4;
+        uint8_t fmt_pl[LO_FORMAT_HEADER_SZ + INIT_PATTERN_DESC_SZ];
+        uint8_t reqSense[MAX_BUFF_SZ];
         char b[80];
 
         memset(fmt_pl, 0, sizeof(fmt_pl));
-        timeout = (immed ? SHORT_TIMEOUT : FORMAT_TIMEOUT);
+        if (immed)
+                timeout = SHORT_TIMEOUT;
+        else {
+                if (op->total_byte_count > EIGHT_TBYTE)
+                        timeout = VLONG_FORMAT_TIMEOUT;
+                else if (op->total_byte_count > FOUR_TBYTE)
+                        timeout = LONG_FORMAT_TIMEOUT;
+                else
+                        timeout = FORMAT_TIMEOUT;
+        }
         if (op->timeout > timeout)
                 timeout = op->timeout;
         longlist = (op->pie > 0);
@@ -323,10 +342,24 @@ scsi_format_unit(int fd, const struct opts_t * op)
         if (need_hdr)
                 fmt_pl_sz = off + (ip_desc ? INIT_PATTERN_DESC_SZ : 0);
 
-        res = sg_ll_format_unit2(fd, op->fmtpinfo, longlist,
-                                 need_hdr/* FMTDATA*/, op->cmplst,
-                                 0 /* DEFECT_LIST_FORMAT */, op->ffmt,
-                                 timeout, fmt_pl, fmt_pl_sz, 1, op->verbose);
+        if (op->dry_run) {
+                res = 0;
+                pr2serr("Due to --dry-run option bypassing FORMAT UNIT "
+                        "command\n");
+                if (op->verbose) {
+                        pr2serr("FU would have received: fmt_pl: ");
+                        hex2stderr(fmt_pl, sizeof(fmt_pl), -1);
+                        pr2serr("  fmtpinfo=0x%x, longlist=%d, need_hdr=%d, "
+                                "cmplst=%d, ffmt=%d, timeout=%d\n",
+                                op->fmtpinfo, longlist, need_hdr, op->cmplst,
+                                op->ffmt, timeout);
+                }
+        } else
+                res = sg_ll_format_unit_v2(fd, op->fmtpinfo, longlist,
+                                        need_hdr/* FMTDATA*/, op->cmplst,
+                                        0 /* DEFECT_LIST_FORMAT */, op->ffmt,
+                                        timeout, fmt_pl, fmt_pl_sz, true,
+                                        op->verbose);
         if (res) {
                 sg_get_category_sense_str(res, sizeof(b), b, op->verbose);
                 pr2serr("Format unit command: %s\n", b);
@@ -335,7 +368,9 @@ scsi_format_unit(int fd, const struct opts_t * op)
         if (! immed)
                 return 0;
 
-        printf("\nFormat unit has started\n");
+        if (! op->dry_run)
+                printf("\nFormat unit has started\n");
+
         if (op->early) {
                 if (immed)
                         printf("Format continuing,\n    request sense or "
@@ -344,6 +379,10 @@ scsi_format_unit(int fd, const struct opts_t * op)
                 return 0;
         }
 
+        if (op->dry_run) {
+                printf("No point in polling for progress, so exit\n");
+                return 0;
+        }
         verb = (op->verbose > 1) ? (op->verbose - 1) : 0;
         if (! op->poll_type) {
                 for(;;) {
@@ -375,8 +414,7 @@ scsi_format_unit(int fd, const struct opts_t * op)
                         resp_len = reqSense[7] + 8;
                         if (verb) {
                                 pr2serr("Parameter data in hex:\n");
-                                dStrHexErr((const char *)reqSense, resp_len,
-                                           1);
+                                hex2stderr(reqSense, resp_len, 1);
                         }
                         progress = -1;
                         sg_get_sense_progress_fld(reqSense, resp_len,
@@ -408,8 +446,7 @@ scsi_format_unit(int fd, const struct opts_t * op)
                 resp_len = requestSenseBuff[7] + 8;
                 if (op->verbose > 1) {
                         pr2serr("Parameter data in hex\n");
-                        dStrHexErr((const char *)requestSenseBuff, resp_len,
-                                   1);
+                        hex2stderr(requestSenseBuff, resp_len, 1);
                 }
                 progress = -1;
                 sg_get_sense_progress_fld(requestSenseBuff, resp_len,
@@ -438,14 +475,29 @@ scsi_format_medium(int fd, const struct opts_t * op)
 {
         int res, progress, pr, rem, verb, resp_len, timeout;
         bool immed = ! op->fwait;
-        unsigned char reqSense[MAX_BUFF_SZ];
+        uint8_t reqSense[MAX_BUFF_SZ];
         char b[80];
 
-        timeout = (immed ? SHORT_TIMEOUT : FORMAT_TIMEOUT);
+        if (immed)
+                timeout = SHORT_TIMEOUT;
+        else {
+                if (op->total_byte_count > EIGHT_TBYTE)
+                        timeout = VLONG_FORMAT_TIMEOUT;
+                else if (op->total_byte_count > FOUR_TBYTE)
+                        timeout = LONG_FORMAT_TIMEOUT;
+                else
+                        timeout = FORMAT_TIMEOUT;
+        }
         if (op->timeout > timeout)
                 timeout = op->timeout;
-        res = sg_ll_format_medium(fd, op->verify, immed, 0xf & op->tape, NULL,
-                                  0, timeout, true, op->verbose);
+        if (op->dry_run) {
+                res = 0;
+                pr2serr("Due to --dry-run option bypassing FORMAT UNIT "
+                        "command\n");
+        } else
+                res = sg_ll_format_medium(fd, op->verify, immed,
+                                          0xf & op->tape, NULL, 0, timeout,
+                                          true, op->verbose);
         if (res) {
                 sg_get_category_sense_str(res, sizeof(b), b, op->verbose);
                 pr2serr("Format medium command: %s\n", b);
@@ -454,7 +506,8 @@ scsi_format_medium(int fd, const struct opts_t * op)
         if (! immed)
                 return 0;
 
-        printf("\nFormat medium has started\n");
+        if (! op->dry_run)
+                printf("\nFormat medium has started\n");
         if (op->early) {
                 if (immed)
                         printf("Format continuing,\n    request sense or "
@@ -463,6 +516,10 @@ scsi_format_medium(int fd, const struct opts_t * op)
                 return 0;
         }
 
+        if (op->dry_run) {
+                printf("No point in polling for progress, so exit\n");
+                return 0;
+        }
         verb = (op->verbose > 1) ? (op->verbose - 1) : 0;
         if (! op->poll_type) {
                 for(;;) {
@@ -494,8 +551,7 @@ scsi_format_medium(int fd, const struct opts_t * op)
                         resp_len = reqSense[7] + 8;
                         if (verb) {
                                 pr2serr("Parameter data in hex:\n");
-                                dStrHexErr((const char *)reqSense, resp_len,
-                                           1);
+                                hex2stderr(reqSense, resp_len, 1);
                         }
                         progress = -1;
                         sg_get_sense_progress_fld(reqSense, resp_len,
@@ -519,10 +575,10 @@ scsi_format_medium(int fd, const struct opts_t * op)
 #define TPROTO_ISCSI 5
 
 static char *
-get_lu_name(const unsigned char * bp, int u_len, char * b, int b_len)
+get_lu_name(const uint8_t * bp, int u_len, char * b, int b_len)
 {
         int len, off, sns_dlen, dlen, k;
-        unsigned char u_sns[512];
+        uint8_t u_sns[512];
         char * cp;
 
         len = u_len - 4;
@@ -579,11 +635,11 @@ get_lu_name(const unsigned char * bp, int u_len, char * b, int b_len)
 #define VPD_DEVICE_ID 0x83
 
 static int
-print_dev_id(int fd, unsigned char * sinq_resp, int max_rlen,
+print_dev_id(int fd, uint8_t * sinq_resp, int max_rlen,
              const struct opts_t * op)
 {
         int res, k, n, verb, pdt, has_sn, has_di;
-        unsigned char b[256];
+        uint8_t b[256];
         char a[256];
         char pdt_name[64];
 
@@ -692,12 +748,13 @@ print_dev_id(int fd, unsigned char * sinq_resp, int max_rlen,
 /* Returns block size or -2 if do_16==0 and the number of blocks is too
  * big, or returns -1 for other error. */
 static int
-print_read_cap(int fd, const struct opts_t * op)
+print_read_cap(int fd, struct opts_t * op)
 {
         int res;
-        unsigned char resp_buff[RCAP_REPLY_LEN];
+        uint8_t resp_buff[RCAP_REPLY_LEN];
         unsigned int last_blk_addr, block_size;
         uint64_t llast_blk_addr;
+        int64_t ll;
         char b[80];
 
         if (op->do_rcap16) {
@@ -724,6 +781,9 @@ print_read_cap(int fd, const struct opts_t * op)
                                llast_blk_addr + 1);
                         printf("   Logical block size=%u bytes\n",
                                block_size);
+                        ll = (int64_t)(llast_blk_addr + 1) * block_size;
+                        if (ll > op->total_byte_count)
+                                op->total_byte_count = ll;
                         return (int)block_size;
                 }
         } else {
@@ -734,7 +794,7 @@ print_read_cap(int fd, const struct opts_t * op)
                         block_size = sg_get_unaligned_be32(resp_buff + 4);
                         if (0xffffffff == last_blk_addr) {
                                 if (op->verbose)
-                                        printf("Read Capacity (10) reponse "
+                                        printf("Read Capacity (10) response "
                                                "indicates that Read Capacity "
                                                "(16) is required\n");
                                 return -2;
@@ -744,6 +804,9 @@ print_read_cap(int fd, const struct opts_t * op)
                                last_blk_addr + 1);
                         printf("   Logical block size=%u bytes\n",
                                block_size);
+                        ll = (int64_t)(last_blk_addr + 1) * block_size;
+                        if (ll > op->total_byte_count)
+                                op->total_byte_count = ll;
                         return (int)block_size;
                 }
         }
@@ -758,12 +821,13 @@ main(int argc, char **argv)
 {
         bool prob = false;
         int fd, res, calc_len, bd_len, dev_specific_param;
-        int offset, j, n, bd_blk_len, len, pdt, rsp_len;
+        int offset, j, bd_blk_len, pdt, rsp_len, vb;
         int resid = 0;
         int ret = 0;
         uint64_t ull;
+        int64_t ll;
         struct opts_t * op;
-        unsigned char inq_resp[SAFE_STD_INQ_RESP_LEN];
+        uint8_t inq_resp[SAFE_STD_INQ_RESP_LEN];
         struct opts_t opts;
         char b[80];
 
@@ -778,7 +842,7 @@ main(int argc, char **argv)
                 int c;
 
                 c = getopt_long(argc, argv,
-                                "c:C:Def:FhIlm:M:pP:q:QrRs:St:T:vVwx:y6",
+                                "c:C:dDef:FhIlm:M:pP:q:QrRs:St:T:vVwx:y6",
                                 long_options, &option_index);
                 if (c == -1)
                         break;
@@ -803,6 +867,9 @@ main(int argc, char **argv)
                                 return SG_LIB_SYNTAX_ERROR;
                         }
                         op->cmplst = !! j;
+                        break;
+                case 'd':
+                        op->dry_run = true;
                         break;
                 case 'D':
                         op->dcrt = true;
@@ -908,11 +975,12 @@ main(int argc, char **argv)
                         }
                         break;
                 case 'v':
+                        op->verbose_given = true;
                         op->verbose++;
                         break;
                 case 'V':
-                        pr2serr("sg_format version: %s\n", version_str);
-                        return 0;
+                        op->version_given = true;
+                        break;
                 case 'w':
                         op->fwait = true;
                         break;
@@ -944,36 +1012,58 @@ main(int argc, char **argv)
                 usage();
                 return SG_LIB_SYNTAX_ERROR;
         }
+#ifdef DEBUG
+        pr2serr("In DEBUG mode, ");
+        if (op->verbose_given && op->version_given) {
+                pr2serr("but override: '-vV' given, zero verbose and "
+                        "continue\n");
+                op->verbose_given = false;
+                op->version_given = false;
+                op->verbose = 0;
+        } else if (! op->verbose_given) {
+                pr2serr("set '-vv'\n");
+                op->verbose = 2;
+        } else
+                pr2serr("keep verbose=%d\n", op->verbose);
+#else
+        if (op->verbose_given && op->version_given)
+                pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+        if (op->version_given) {
+                pr2serr("sg_format version: %s\n", version_str);
+                return 0;
+        }
+        vb = op->verbose;
         if (NULL == op->device_name) {
-                pr2serr("no DEVICE name given\n");
+                pr2serr("no DEVICE name given\n\n");
                 usage();
                 return SG_LIB_SYNTAX_ERROR;
         }
         if (op->format && (op->tape >= 0)) {
                 pr2serr("Cannot choose both '--format' and '--tape='; disk "
                         "or tape, choose one only\n");
-                return SG_LIB_SYNTAX_ERROR;
+                return SG_LIB_CONTRADICT;
         }
         if (op->ip_def && op->sec_init) {
                 pr2serr("'--ip_def' and '--security' contradict, choose "
                         "one\n");
-                return SG_LIB_SYNTAX_ERROR;
+                return SG_LIB_CONTRADICT;
         }
         if (op->resize) {
                 if (op->format) {
                         pr2serr("both '--format' and '--resize' not "
                                 "permitted\n");
                         usage();
-                        return SG_LIB_SYNTAX_ERROR;
+                        return SG_LIB_CONTRADICT;
                 } else if (0 == op->blk_count) {
                         pr2serr("'--resize' needs a '--count' (other than "
                                 "0)\n");
                         usage();
-                        return SG_LIB_SYNTAX_ERROR;
+                        return SG_LIB_CONTRADICT;
                 } else if (0 != op->blk_size) {
                         pr2serr("'--resize' not compatible with '--size'\n");
                         usage();
-                        return SG_LIB_SYNTAX_ERROR;
+                        return SG_LIB_CONTRADICT;
                 }
         }
         if ((op->pinfo > 0) || (op->rto_req > 0) || (op->fmtpinfo > 0)) {
@@ -982,7 +1072,7 @@ main(int argc, char **argv)
                                 "'--rto_req' together with\n'--fmtpinfo', "
                                 "best use '--fmtpinfo' only\n");
                         usage();
-                        return SG_LIB_SYNTAX_ERROR;
+                        return SG_LIB_CONTRADICT;
                 }
                 if (op->pinfo)
                         op->fmtpinfo |= 2;
@@ -991,10 +1081,10 @@ main(int argc, char **argv)
         }
 
         if ((fd = sg_cmds_open_device(op->device_name, false /* rw=false */,
-                                      op->verbose)) < 0) {
+                                      vb)) < 0) {
                 pr2serr("error opening device file: %s: %s\n",
                         op->device_name, safe_strerror(-fd));
-                return SG_LIB_FILE_ERROR;
+                return sg_convert_errno(-fd);
         }
 
         if (op->format > 2)
@@ -1027,13 +1117,13 @@ again_with_long_lba:
         if (op->mode6)
                 res = sg_ll_mode_sense6(fd, false /* DBD */, 0 /* current */,
                                         op->mode_page, 0 /* subpage */, dbuff,
-                                        MAX_BUFF_SZ, true, op->verbose);
+                                        MAX_BUFF_SZ, true, vb);
         else
                 res = sg_ll_mode_sense10_v2(fd, op->long_lba, false /* DBD */,
                                             0 /* current */, op->mode_page,
                                             0 /* subpage */, dbuff,
                                             MAX_BUFF_SZ, 0, &resid, true,
-                                            op->verbose);
+                                            vb);
         ret = res;
         if (res) {
                 if (SG_LIB_CAT_ILLEGAL_REQ == res) {
@@ -1046,12 +1136,11 @@ again_with_long_lba:
                                         "[mode_page %d not supported?]\n",
                                         (op->mode6 ? 6 : 10), op->mode_page);
                 } else {
-                        sg_get_category_sense_str(res, sizeof(b), b,
-                                                  op->verbose);
+                        sg_get_category_sense_str(res, sizeof(b), b, vb);
                         pr2serr("MODE SENSE (%d) command: %s\n",
                                 (op->mode6 ? 6 : 10), b);
                 }
-                if (0 == op->verbose)
+                if (0 == vb)
                         pr2serr("    try '-v' for more information\n");
                 goto out;
         }
@@ -1109,7 +1198,7 @@ again_with_long_lba:
                 ull = op->long_lba ? sg_get_unaligned_be64(dbuff + offset) :
                                  sg_get_unaligned_be32(dbuff + offset);
                 if ((! op->long_lba) && (0xffffffff == ull)) {
-                        if (op->verbose)
+                        if (vb)
                                 pr2serr("Mode sense number of blocks maxed "
                                         "out, set longlba\n");
                         op->long_lba = true;
@@ -1129,6 +1218,9 @@ again_with_long_lba:
                 printf("  Number of blocks=%" PRIu64 " [0x%" PRIx64 "]\n",
                        ull, ull);
                 printf("  Block size=%d [0x%x]\n", bd_blk_len, bd_blk_len);
+                ll = (int64_t)ull * bd_blk_len;
+                if (ll > op->total_byte_count)
+                        op->total_byte_count = ll;
         } else {
                 printf("  No block descriptors present\n");
                 prob = true;
@@ -1136,39 +1228,6 @@ again_with_long_lba:
         if (op->resize || (op->format && ((op->blk_count != 0) ||
               ((op->blk_size > 0) && (op->blk_size != bd_blk_len))))) {
                 /* want to run MODE SELECT */
-
-/* Working Draft SCSI Primary Commands - 3 (SPC-3)    pg 255
-**
-** If the SCSI device doesn't support changing its capacity by changing
-** the NUMBER OF BLOCKS field using the MODE SELECT command, the value
-** in the NUMBER OF BLOCKS field is ignored. If the device supports changing
-** its capacity by changing the NUMBER OF BLOCKS field, then the
-** NUMBER OF BLOCKS field is interpreted as follows:
-**      a) If the number of blocks is set to zero, the device shall retain
-**         its current capacity if the block size has not changed. If the
-**         number of blocks is set to zero and the block size has changed,
-**         the device shall be set to its maximum capacity when the new
-**         block size takes effect;
-**
-**      b) If the number of blocks is greater than zero and less than or
-**         equal to its maximum capacity, the device shall be set to that
-**         number of blocks. If the block size has not changed, the device
-**         shall not become format corrupted. This capacity setting shall be
-**         retained through power cycles, hard resets, logical unit resets,
-**         and I_T nexus losses;
-**
-**      c) If the number of blocks field is set to a value greater than the
-**         maximum capacity of the device and less than FFFF FFFFh, then the
-**         command is terminated with a CHECK CONDITION status. The sense key
-**         is set to ILLEGAL REQUEST. The device shall retain its previous
-**         block descriptor settings; or
-**
-**      d) If the number of blocks is set to FFFF FFFFh, the device shall be
-**         set to its maximum capacity. If the block size has not changed,
-**         the device shall not become format corrupted. This capacity setting
-**         shall be retained through power cycles, hard resets, logical unit
-**         resets, and I_T nexus losses.
-*/
 
                 if (prob) {
                         pr2serr("Need to perform MODE SELECT (to change "
@@ -1178,19 +1237,18 @@ again_with_long_lba:
                         ret = SG_LIB_CAT_MALFORMED;
                         goto out;
                 }
-                if (op->blk_count != 0)  {
-                        len = (op->long_lba ? 8 : 4);
-                        for (j = 0; j < len; ++j) {
-                                n = (len - j - 1) * 8;
-                                dbuff[offset + j] =
-                                            (op->blk_count >> n) & 0xff;
-                        }
+                if (op->blk_count != 0)  { /* user supplied blk count */
+                        if (op->long_lba)
+                                sg_put_unaligned_be64(op->blk_count,
+                                                      dbuff + offset);
+                        else
+                                sg_put_unaligned_be32(op->blk_count,
+                                                      dbuff + offset);
                 } else if ((op->blk_size > 0) &&
-                           (op->blk_size != bd_blk_len)) {
-                        len = (op->long_lba ? 8 : 4);
-                        for (j = 0; j < len; ++j)
-                                dbuff[offset + j] = 0;
-                }
+                           (op->blk_size != bd_blk_len))
+                        /* 0 implies max capacity with new LB size */
+                        memset(dbuff + offset, 0, op->long_lba ? 8 : 4);
+
                 if ((op->blk_size > 0) && (op->blk_size != bd_blk_len)) {
                         if (op->long_lba)
                                 sg_put_unaligned_be32((uint32_t)op->blk_size,
@@ -1199,20 +1257,34 @@ again_with_long_lba:
                                 sg_put_unaligned_be24((uint32_t)op->blk_size,
                                                       dbuff + offset + 5);
                 }
-                if (op->mode6)
-                        res = sg_ll_mode_select6(fd, true /* PF */,
-                                                 true /* SP */, dbuff,
-                                                 calc_len, true, op->verbose);
-                else
-                        res = sg_ll_mode_select10(fd, true /* PF */,
-                                                  true /* SP */, dbuff,
-                                                  calc_len, true, op->verbose);
+                if (op->dry_run) {
+                        pr2serr("Due to --dry-run option bypass MODE "
+                                "SELECT(%d)command\n", (op->mode6 ? 6 : 10));
+                        res = 0;
+                } else {
+                        bool sp = true;   /* may not be able to save pages */
+
+again_sp_false:
+                        if (op->mode6)
+                                res = sg_ll_mode_select6(fd, true /* PF */,
+                                                         sp, dbuff, calc_len,
+                                                         true, vb);
+                        else
+                                res = sg_ll_mode_select10(fd, true /* PF */,
+                                                          sp, dbuff, calc_len,
+                                                          true, vb);
+                        if ((SG_LIB_CAT_ILLEGAL_REQ == res) && sp) {
+                                pr2serr("Try MODE SELECT again with SP=0 "
+                                        "this time\n");
+                                sp = false;
+                                goto again_sp_false;
+                        }
+                }
                 ret = res;
                 if (res) {
-                        sg_get_category_sense_str(res, sizeof(b), b,
-                                                  op->verbose);
+                        sg_get_category_sense_str(res, sizeof(b), b, vb);
                         pr2serr("MODE SELECT command: %s\n", b);
-                        if (0 == op->verbose)
+                        if (0 == vb)
                                 pr2serr("    try '-v' for more information\n");
                         goto out;
                 }
@@ -1269,7 +1341,7 @@ skip_f_unit_reconsider:
                 ret = res;
                 if (res) {
                         pr2serr("FORMAT UNIT failed\n");
-                        if (0 == op->verbose)
+                        if (0 == vb)
                                 pr2serr("    try '-v' for more "
                                         "information\n");
                 }
@@ -1304,7 +1376,7 @@ skip_f_med_reconsider:
         ret = res;
         if (res) {
                 pr2serr("FORMAT MEDIUM failed\n");
-                if (0 == op->verbose)
+                if (0 == vb)
                         pr2serr("    try '-v' for more "
                                 "information\n");
         }
@@ -1314,7 +1386,12 @@ out:
         if (res < 0) {
                 pr2serr("close error: %s\n", safe_strerror(-res));
                 if (0 == ret)
-                        return SG_LIB_FILE_ERROR;
+                        ret = sg_convert_errno(-res);
+        }
+        if (0 == vb) {
+                if (! sg_if_can2stderr("sg_format failed: ", ret))
+                        pr2serr("Some error occurred, try again with '-v' "
+                                "or '-vv' for more information\n");
         }
         return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

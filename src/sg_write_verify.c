@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2017 Douglas Gilbert
+ * Copyright (c) 2014-2018 Douglas Gilbert
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -31,13 +31,14 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_pt.h"
 #include "sg_cmds_basic.h"
 #include "sg_unaligned.h"
 #include "sg_pr2serr.h"
 
-static const char * version_str = "1.11 20171008";
+static const char * version_str = "1.15 20180628";
 
 
 #define ME "sg_write_verify: "
@@ -120,13 +121,13 @@ usage()
 /* Invokes a SCSI WRITE AND VERIFY according with CDB. Returns 0 -> success,
  * various SG_LIB_CAT_* positive values or -1 -> other errors */
 static int
-run_scsi_transaction(int sg_fd, const unsigned char *cdbp, int cdb_len,
-                     unsigned char *dop, int do_len, int timeout,
+run_scsi_transaction(int sg_fd, const uint8_t *cdbp, int cdb_len,
+                     uint8_t *dop, int do_len, int timeout,
                      bool noisy, int verbose)
 {
     int res, k, sense_cat, ret;
     struct sg_pt_base * ptvp;
-    unsigned char sense_b[SENSE_BUFF_LEN];
+    uint8_t sense_b[SENSE_BUFF_LEN];
     char b[32];
 
     snprintf(b, sizeof(b), "Write and verify(%d)", cdb_len);
@@ -137,7 +138,7 @@ run_scsi_transaction(int sg_fd, const unsigned char *cdbp, int cdb_len,
        pr2serr("\n");
        if ((verbose > 2) && dop && do_len) {
             pr2serr("    Data out buffer [%d bytes]:\n", do_len);
-            dStrHexErr((const char *)dop, do_len, -1);
+            hex2stderr(dop, do_len, -1);
         }
     }
     ptvp = construct_scsi_pt_obj();
@@ -152,7 +153,7 @@ run_scsi_transaction(int sg_fd, const unsigned char *cdbp, int cdb_len,
     ret = sg_cmds_process_resp(ptvp, b, res, SG_NO_DATA_IN, sense_b, noisy,
                                verbose, &sense_cat);
     if (-1 == ret)
-        ;
+        ret = sg_convert_errno(get_scsi_pt_os_err(ptvp));
     else if (-2 == ret) {
         switch (sense_cat) {
         case SG_LIB_CAT_RECOVERED:
@@ -191,11 +192,11 @@ run_scsi_transaction(int sg_fd, const unsigned char *cdbp, int cdb_len,
 static int
 sg_ll_write_verify10(int sg_fd, int wrprotect, bool dpo, int bytchk,
                      unsigned int lba, int num_lb, int group,
-                     unsigned char *dop, int do_len, int timeout,
+                     uint8_t *dop, int do_len, int timeout,
                      bool noisy, int verbose)
 {
     int ret;
-    unsigned char wv_cdb[WRITE_VERIFY10_CMDLEN];
+    uint8_t wv_cdb[WRITE_VERIFY10_CMDLEN];
 
     memset(wv_cdb, 0, WRITE_VERIFY10_CMDLEN);
     wv_cdb[0] = WRITE_VERIFY10_CMD;
@@ -217,11 +218,11 @@ sg_ll_write_verify10(int sg_fd, int wrprotect, bool dpo, int bytchk,
 * various SG_LIB_CAT_* positive values or -1 -> other errors */
 static int
 sg_ll_write_verify16(int sg_fd, int wrprotect, bool dpo, int bytchk,
-                     uint64_t llba, int num_lb, int group, unsigned char *dop,
+                     uint64_t llba, int num_lb, int group, uint8_t *dop,
                      int do_len, int timeout, bool noisy, int verbose)
 {
     int ret;
-    unsigned char wv_cdb[WRITE_VERIFY16_CMDLEN];
+    uint8_t wv_cdb[WRITE_VERIFY16_CMDLEN];
 
 
     memset(wv_cdb, 0, sizeof(wv_cdb));
@@ -240,18 +241,21 @@ sg_ll_write_verify16(int sg_fd, int wrprotect, bool dpo, int bytchk,
     return ret;
 }
 
+/* Returns file descriptor ( >= 0) if successfule. Else a negated sg3_utils
+ * error code is returned. */
 static int
 open_if(const char * fn, int got_stdin)
 {
-    int fd;
+    int fd, err;
 
     if (got_stdin)
         fd = STDIN_FILENO;
     else {
         fd = open(fn, O_RDONLY);
         if (fd < 0) {
-            pr2serr(ME "open error: %s: %s\n", fn, safe_strerror(errno));
-            return -SG_LIB_FILE_ERROR;
+            err = errno;
+            pr2serr(ME "open error: %s: %s\n", fn, safe_strerror(err));
+            return -sg_convert_errno(err);
         }
     }
     if (sg_set_binary_mode(fd) < 0) {
@@ -271,6 +275,8 @@ main(int argc, char * argv[])
     bool has_filename = false;
     bool lba_given = false;
     bool repeat = false;
+    bool verbose_given = false;
+    bool version_given = false;
     int sg_fd, res, c, n;
     int bytchk = 0;
     int group = 0;
@@ -286,8 +292,9 @@ main(int argc, char * argv[])
     uint32_t snum_lb = 1;
     uint64_t llba = 0;
     int64_t ll;
-    unsigned char * wvb = NULL;
-    void * wrkBuff = NULL;
+    uint8_t * wvb = NULL;
+    uint8_t * wrkBuff = NULL;
+    uint8_t * free_wrkBuff = NULL;
     const char * device_name = NULL;
     const char * ifnp;
     char cmd_name[32];
@@ -372,11 +379,12 @@ main(int argc, char * argv[])
             }
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr(ME "version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         case 'w':
             wrprotect = sg_get_num(optarg);
             if ((wrprotect < 0) || (wrprotect > 7))  {
@@ -405,8 +413,29 @@ main(int argc, char * argv[])
        }
     }
 
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr(ME "version: %s\n", version_str);
+        return 0;
+    }
+
     if (NULL == device_name) {
-        pr2serr("missing device name!\n");
+        pr2serr("Missing device name!\n\n");
         usage();
         return SG_LIB_SYNTAX_ERROR;
     }
@@ -419,12 +448,12 @@ main(int argc, char * argv[])
         if (! has_filename) {
             pr2serr("with '--repeat' need '--in=IF' option\n");
             usage();
-            return SG_LIB_SYNTAX_ERROR;
+            return SG_LIB_CONTRADICT;
         }
         if (ilen < 1) {
             pr2serr("with '--repeat' need '--ilen=ILEN' option\n");
             usage();
-            return SG_LIB_SYNTAX_ERROR;
+            return SG_LIB_CONTRADICT;
         } else {
             b_p_lb = ilen / num_lb;
             if (b_p_lb < 64) {
@@ -438,8 +467,9 @@ main(int argc, char * argv[])
 
     sg_fd = sg_cmds_open_device(device_name, false /* rw */, verbose);
     if (sg_fd < 0) {
+        ret = sg_convert_errno(-sg_fd);
         pr2serr(ME "open error: %s: %s\n", device_name, safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        goto err_out;
     }
 
     if ((! do_16) && (llba > UINT_MAX))
@@ -496,12 +526,13 @@ main(int argc, char * argv[])
                     } else if (verbose)
                         pr2serr("Using file size of %d bytes\n", ilen);
                 }
-                if (NULL == (wrkBuff = malloc(ilen))) {
+                if (NULL == (wrkBuff = (uint8_t *)sg_memalign(ilen, 0,
+                                           &free_wrkBuff, verbose > 3))) {
                     pr2serr(ME "out of memory\n");
-                    ret = SG_LIB_CAT_OTHER;
+                    ret = sg_convert_errno(ENOMEM);
                     goto err_out;
                 }
-                wvb = (unsigned char *)wrkBuff;
+                wvb = (uint8_t *)wrkBuff;
                 res = read(ifd, wvb, ilen);
                 if (res < 0) {
                     pr2serr("Could not read from %s", ifnp);
@@ -522,12 +553,13 @@ main(int argc, char * argv[])
                                 num_lb, 512, 512 * num_lb);
                     ilen = 512 * num_lb;
                 }
-                if (NULL == (wrkBuff = malloc(ilen))) {
+                if (NULL == (wrkBuff = (uint8_t *)sg_memalign(ilen, 0,
+                                           &free_wrkBuff, verbose > 3))) {
                     pr2serr(ME "out of memory\n");
-                    ret = SG_LIB_CAT_OTHER;
+                    ret = sg_convert_errno(ENOMEM);
                     goto err_out;
                 }
-                wvb = (unsigned char *)wrkBuff;
+                wvb = (uint8_t *)wrkBuff;
                 /* Not sure about this: default contents to 0xff bytes */
                 memset(wrkBuff, 0xff, ilen);
             }
@@ -575,23 +607,20 @@ err_out:
     if (repeat)
         pr2serr("%d [0x%x] logical blocks written, in total\n", tnum_lb_wr,
                 tnum_lb_wr);
-    if (wrkBuff)
-        free(wrkBuff);
+    if (free_wrkBuff)
+        free(free_wrkBuff);
     if ((ifd >= 0) && (STDIN_FILENO != ifd))
         close(ifd);
     res = sg_cmds_close_device(sg_fd);
     if (res < 0) {
         pr2serr("close error: %s\n", safe_strerror(-res));
         if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+            ret = sg_convert_errno(-res);
     }
     if (ret && (0 == verbose)) {
-        if (SG_LIB_CAT_INVALID_OP == ret)
-            pr2serr("%s command not supported\n", cmd_name);
-        else if (ret > 0)
-            pr2serr("%s, exit status %d\n", cmd_name, ret);
-        else if (ret < 0)
-            pr2serr("Some error occurred\n");
+        if (! sg_if_can2stderr("sg_write_verify failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

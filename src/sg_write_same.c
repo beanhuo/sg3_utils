@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2017 Douglas Gilbert.
+ * Copyright (c) 2009-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -23,6 +23,7 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_pt.h"
 #include "sg_cmds_basic.h"
@@ -30,7 +31,7 @@
 #include "sg_unaligned.h"
 #include "sg_pr2serr.h"
 
-static const char * version_str = "1.18 20171025";
+static const char * version_str = "1.26 20180723";
 
 
 #define ME "sg_write_same: "
@@ -84,6 +85,8 @@ struct opts_t {
     bool lbdata;
     bool pbdata;
     bool unmap;
+    bool verbose_given;
+    bool version_given;
     bool want_ws10;
     int grpnum;
     int numblocks;
@@ -149,7 +152,8 @@ usage()
             "specified blocks\nwill be filled with zeros or the "
             "'provisioning initialization pattern'\nas indicated by the "
             "LBPRZ field. As a precaution one of the '--in=',\n'--lba=' or "
-            "'--num=' options is required.\n"
+            "'--num=' options is required.\nAnother implementation of WRITE "
+            "SAME is found in the sg_write_x utility.\n"
             );
 }
 
@@ -159,8 +163,8 @@ do_write_same(int sg_fd, const struct opts_t * op, const void * dataoutp,
 {
     int k, ret, res, sense_cat, cdb_len;
     uint64_t llba;
-    unsigned char ws_cdb[WRITE_SAME32_LEN];
-    unsigned char sense_b[SENSE_BUFF_LEN];
+    uint8_t ws_cdb[WRITE_SAME32_LEN];
+    uint8_t sense_b[SENSE_BUFF_LEN];
     struct sg_pt_base * ptvp;
 
     cdb_len = op->pref_cdb_size;
@@ -253,7 +257,7 @@ do_write_same(int sg_fd, const struct opts_t * op, const void * dataoutp,
     }
     if ((op->verbose > 3) && (op->xfer_len > 0)) {
         pr2serr("    Data-out buffer contents:\n");
-        dStrHexErr((const char *)dataoutp, op->xfer_len, 1);
+        hex2stderr((const uint8_t *)dataoutp, op->xfer_len, 1);
     }
     ptvp = construct_scsi_pt_obj();
     if (NULL == ptvp) {
@@ -262,13 +266,13 @@ do_write_same(int sg_fd, const struct opts_t * op, const void * dataoutp,
     }
     set_scsi_pt_cdb(ptvp, ws_cdb, cdb_len);
     set_scsi_pt_sense(ptvp, sense_b, sizeof(sense_b));
-    set_scsi_pt_data_out(ptvp, (unsigned char *)dataoutp, op->xfer_len);
+    set_scsi_pt_data_out(ptvp, (uint8_t *)dataoutp, op->xfer_len);
     res = do_scsi_pt(ptvp, sg_fd, op->timeout, op->verbose);
     ret = sg_cmds_process_resp(ptvp, "Write same", res, SG_NO_DATA_IN,
                                sense_b, true /*noisy */, op->verbose,
                                &sense_cat);
     if (-1 == ret)
-        ;
+        get_scsi_pt_os_err(ptvp);
     else if (-2 == ret) {
         switch (sense_cat) {
         case SG_LIB_CAT_RECOVERED:
@@ -309,16 +313,18 @@ main(int argc, char * argv[])
     bool lba_given = false;
     bool num_given = false;
     bool prot_en;
-    int sg_fd, res, c, infd, act_cdb_len, vb;
+    int res, c, infd, act_cdb_len, vb, err;
+    int sg_fd = -1;
     int ret = -1;
     uint32_t block_size;
     int64_t ll;
     const char * device_name = NULL;
     struct opts_t * op;
-    unsigned char * wBuff = NULL;
+    uint8_t * wBuff = NULL;
+    uint8_t * free_wBuff = NULL;
     char ebuff[EBUFF_SZ];
     char b[80];
-    unsigned char resp_buff[RCAP16_RESP_LEN];
+    uint8_t resp_buff[RCAP16_RESP_LEN];
     struct opts_t opts;
     struct stat a_stat;
 
@@ -351,7 +357,8 @@ main(int argc, char * argv[])
             usage();
             return 0;
         case 'i':
-            strncpy(op->ifilename, optarg, sizeof(op->ifilename));
+            strncpy(op->ifilename, optarg, sizeof(op->ifilename) - 1);
+            op->ifilename[sizeof(op->ifilename) - 1] = '\0';
             if_given = true;
             break;
         case 'l':
@@ -386,7 +393,7 @@ main(int argc, char * argv[])
         case 'S':
             if (DEF_WS_CDB_SIZE != op->pref_cdb_size) {
                 pr2serr("only one '--10', '--16' or '--32' please\n");
-                return SG_LIB_SYNTAX_ERROR;
+                return SG_LIB_CONTRADICT;
             }
             op->pref_cdb_size = 16;
             break;
@@ -400,7 +407,7 @@ main(int argc, char * argv[])
         case 'T':
             if (DEF_WS_CDB_SIZE != op->pref_cdb_size) {
                 pr2serr("only one '--10', '--16' or '--32' please\n");
-                return SG_LIB_SYNTAX_ERROR;
+                return SG_LIB_CONTRADICT;
             }
             op->pref_cdb_size = 32;
             break;
@@ -408,11 +415,12 @@ main(int argc, char * argv[])
             op->unmap = true;
             break;
         case 'v':
+            op->verbose_given = true;
             ++op->verbose;
             break;
         case 'V':
-            pr2serr(ME "version: %s\n", version_str);
-            return 0;
+            op->version_given = true;
+            break;
         case 'w':
             op->wrprotect = sg_get_num(optarg);
             if ((op->wrprotect < 0) || (op->wrprotect > 7))  {
@@ -447,10 +455,32 @@ main(int argc, char * argv[])
     }
     if (op->want_ws10 && (DEF_WS_CDB_SIZE != op->pref_cdb_size)) {
         pr2serr("only one '--10', '--16' or '--32' please\n");
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CONTRADICT;
     }
+
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (op->verbose_given && op->version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        op->verbose_given = false;
+        op->version_given = false;
+        op->verbose = 0;
+    } else if (! op->verbose_given) {
+        pr2serr("set '-vv'\n");
+        op->verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", op->verbose);
+#else
+    if (op->verbose_given && op->version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (op->version_given) {
+        pr2serr(ME "version: %s\n", version_str);
+        return 0;
+    }
+
     if (NULL == device_name) {
-        pr2serr("missing device name!\n");
+        pr2serr("Missing device name!\n\n");
         usage();
         return SG_LIB_SYNTAX_ERROR;
     }
@@ -459,28 +489,29 @@ main(int argc, char * argv[])
     if ((! if_given) && (! lba_given) && (! num_given)) {
         pr2serr("As a precaution, one of '--in=', '--lba=' or '--num=' is "
                 "required\n");
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CONTRADICT;
     }
 
     if (op->ndob) {
         if (if_given) {
             pr2serr("Can't have both --ndob and '--in='\n");
-            return SG_LIB_SYNTAX_ERROR;
+            return SG_LIB_CONTRADICT;
         }
         if (0 != op->xfer_len) {
             pr2serr("With --ndob only '--xferlen=0' (or not given) is "
                     "acceptable\n");
-            return SG_LIB_SYNTAX_ERROR;
+            return SG_LIB_CONTRADICT;
         }
     } else if (op->ifilename[0]) {
         got_stdin = (0 == strcmp(op->ifilename, "-"));
         if (! got_stdin) {
             memset(&a_stat, 0, sizeof(a_stat));
             if (stat(op->ifilename, &a_stat) < 0) {
+                err = errno;
                 if (vb)
                     pr2serr("unable to stat(%s): %s\n", op->ifilename,
-                            safe_strerror(errno));
-                return SG_LIB_FILE_ERROR;
+                            safe_strerror(err));
+                return sg_convert_errno(err);
             }
             if (op->xfer_len <= 0)
                 op->xfer_len = (int)a_stat.st_size;
@@ -489,8 +520,11 @@ main(int argc, char * argv[])
 
     sg_fd = sg_cmds_open_device(device_name, false /* rw */, vb);
     if (sg_fd < 0) {
-        pr2serr(ME "open error: %s: %s\n", device_name, safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        if (op->verbose)
+            pr2serr(ME "open error: %s: %s\n", device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
+        goto err_out;
     }
 
     if (! op->ndob) {
@@ -507,7 +541,7 @@ main(int argc, char * argv[])
             }
             if (0 == res) {
                 if (vb > 3)
-                    dStrHexErr((const char *)resp_buff, RCAP16_RESP_LEN, 1);
+                    hex2stderr(resp_buff, RCAP16_RESP_LEN, 1);
                 block_size = sg_get_unaligned_be32(resp_buff + 8);
                 prot_en = !!(resp_buff[12] & 0x1);
                 op->xfer_len = block_size;
@@ -523,8 +557,7 @@ main(int argc, char * argv[])
                                        (vb ? (vb - 1): 0));
                 if (0 == res) {
                     if (vb > 3)
-                        dStrHexErr((const char *)resp_buff, RCAP10_RESP_LEN,
-                                   1);
+                        hex2stderr(resp_buff, RCAP10_RESP_LEN, 1);
                     block_size = sg_get_unaligned_be32(resp_buff + 4);
                     op->xfer_len = block_size;
                 } else {
@@ -550,11 +583,11 @@ main(int argc, char * argv[])
             ret = SG_LIB_SYNTAX_ERROR;
             goto err_out;
         }
-        wBuff = (unsigned char*)calloc(op->xfer_len, 1);
+        wBuff = (uint8_t *)sg_memalign(op->xfer_len, 0, &free_wBuff, vb > 3);
         if (NULL == wBuff) {
-            pr2serr("unable to allocate %d bytes of memory with calloc()\n",
-                    op->xfer_len);
-            ret = SG_LIB_SYNTAX_ERROR;
+            pr2serr("unable to allocate %d bytes of memory with "
+                    "sg_memalign()\n", op->xfer_len);
+            ret = sg_convert_errno(ENOMEM);
             goto err_out;
         }
         if (op->ifilename[0]) {
@@ -564,22 +597,22 @@ main(int argc, char * argv[])
                     perror("sg_set_binary_mode");
             } else {
                 if ((infd = open(op->ifilename, O_RDONLY)) < 0) {
+                    ret = sg_convert_errno(errno);
                     snprintf(ebuff, EBUFF_SZ, ME "could not open %.400s for "
                              "reading", op->ifilename);
                     perror(ebuff);
-                    ret = SG_LIB_FILE_ERROR;
                     goto err_out;
                 } else if (sg_set_binary_mode(infd) < 0)
                     perror("sg_set_binary_mode");
             }
             res = read(infd, wBuff, op->xfer_len);
             if (res < 0) {
+                ret = sg_convert_errno(errno);
                 snprintf(ebuff, EBUFF_SZ, ME "couldn't read from %.400s",
                          op->ifilename);
                 perror(ebuff);
                 if (! got_stdin)
                     close(infd);
-                ret = SG_LIB_FILE_ERROR;
                 goto err_out;
             }
             if (res < op->xfer_len) {
@@ -610,13 +643,20 @@ main(int argc, char * argv[])
     }
 
 err_out:
-    if (wBuff)
-        free(wBuff);
-    res = sg_cmds_close_device(sg_fd);
-    if (res < 0) {
-        pr2serr("close error: %s\n", safe_strerror(-res));
-        if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+    if (free_wBuff)
+        free(free_wBuff);
+    if (sg_fd >= 0) {
+        res = sg_cmds_close_device(sg_fd);
+        if (res < 0) {
+            pr2serr("close error: %s\n", safe_strerror(-res));
+            if (0 == ret)
+                ret = sg_convert_errno(-res);
+        }
+    }
+    if (0 == op->verbose) {
+        if (! sg_if_can2stderr("sg_write_same failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

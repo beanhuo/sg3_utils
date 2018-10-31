@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2017 Douglas Gilbert.
+ * Copyright (c) 2011-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -23,6 +23,7 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_pt.h"
 #include "sg_cmds_basic.h"
@@ -30,7 +31,7 @@
 #include "sg_unaligned.h"
 #include "sg_pr2serr.h"
 
-static const char * version_str = "1.04 20171008";
+static const char * version_str = "1.11 20180628";
 
 /* Not all environments support the Unix sleep() */
 #if defined(MSC_VER) || defined(__MINGW32__)
@@ -69,6 +70,8 @@ static struct option long_options[] = {
     {"count", required_argument, 0, 'c'},
     {"crypto", no_argument, 0, 'C'},
     {"desc", no_argument, 0, 'd'},
+    {"dry-run", no_argument, 0, 'D'},
+    {"dry_run", no_argument, 0, 'D'},
     {"early", no_argument, 0, 'e'},
     {"fail", no_argument, 0, 'F'},
     {"help", no_argument, 0, 'h'},
@@ -91,11 +94,14 @@ struct opts_t {
     bool block;
     bool crypto;
     bool desc;
+    bool dry_run;
     bool early;
     bool fail;
     bool invert;
     bool overwrite;
     bool quick;
+    bool verbose_given;
+    bool version_given;
     bool wait;
     bool znr;
     int count;
@@ -112,13 +118,14 @@ static void
 usage()
 {
   pr2serr("Usage: sg_sanitize [--ause] [--block] [--count=OC] [--crypto] "
-          "[--early]\n"
-          "                   [--fail] [--help] [--invert] [--ipl=LEN] "
-          "[--overwrite]\n"
-          "                   [--pattern=PF] [--quick] [--test=TE] "
-          "[--timeout=SEC]\n"
-          "                   [--verbose] [--version] [--wait] [--zero] "
-          "[--znr] DEVICE\n"
+          "[--dry-run]\n"
+          "                   [--early] [--fail] [--help] [--invert] "
+          "[--ipl=LEN]\n"
+          "                   [--overwrite] [--pattern=PF] [--quick] "
+          "[--test=TE]\n"
+          "                   [--timeout=SECS] [--verbose] [--version] "
+          "[--wait]\n"
+          "                   [--zero] [--znr] DEVICE\n"
           "  where:\n"
           "    --ause|-A            set AUSE bit in cdb\n"
           "    --block|-B           do BLOCK ERASE sanitize\n"
@@ -128,6 +135,8 @@ usage()
           "    --desc|-d            polling request sense sets 'desc' "
           "field\n"
           "                         (def: clear 'desc' field)\n"
+          "    --dry-run|-D         to preparation but bypass SANITIZE "
+          "commnd\n"
           "    --early|-e           exit once sanitize started (IMMED set "
           "in cdb)\n"
           "                         user can monitor progress with REQUEST "
@@ -148,7 +157,8 @@ usage()
           "    --test=TE|-T TE      TE is placed in TEST field of "
           "OVERWRITE\n"
           "                         parameter list (def: 0)\n"
-          "    --timeout=SEC|-t SEC    SANITIZE command timeout in seconds\n"
+          "    --timeout=SECS|-t SECS    SANITIZE command timeout in "
+          "seconds\n"
           "    --verbose|-v         increase verbosity\n"
           "    --version|-V         print version string then exit\n"
           "    --wait|-w            wait for command to finish (could "
@@ -172,8 +182,8 @@ do_sanitize(int sg_fd, const struct opts_t * op, const void * param_lstp,
 {
     bool immed;
     int k, ret, res, sense_cat, timeout;
-    unsigned char san_cdb[SANITIZE_OP_LEN];
-    unsigned char sense_b[SENSE_BUFF_LEN];
+    uint8_t san_cdb[SANITIZE_OP_LEN];
+    uint8_t sense_b[SENSE_BUFF_LEN];
     struct sg_pt_base * ptvp;
 
     if (op->early || op->wait)
@@ -212,10 +222,14 @@ do_sanitize(int sg_fd, const struct opts_t * op, const void * param_lstp,
         if (op->verbose > 2) {
             if (param_lst_len > 0) {
                 pr2serr("    Parameter list contents:\n");
-                dStrHexErr((const char *)param_lstp, param_lst_len, 1);
+                hex2stderr((const uint8_t *)param_lstp, param_lst_len, -1);
             }
             pr2serr("    Sanitize command timeout: %d seconds\n", timeout);
         }
+    }
+    if (op->dry_run) {
+        pr2serr("Due to --dry-run option, bypassing SANITIZE command\n");
+        return 0;
     }
     ptvp = construct_scsi_pt_obj();
     if (NULL == ptvp) {
@@ -224,12 +238,12 @@ do_sanitize(int sg_fd, const struct opts_t * op, const void * param_lstp,
     }
     set_scsi_pt_cdb(ptvp, san_cdb, sizeof(san_cdb));
     set_scsi_pt_sense(ptvp, sense_b, sizeof(sense_b));
-    set_scsi_pt_data_out(ptvp, (unsigned char *)param_lstp, param_lst_len);
+    set_scsi_pt_data_out(ptvp, (uint8_t *)param_lstp, param_lst_len);
     res = do_scsi_pt(ptvp, sg_fd, timeout, op->verbose);
     ret = sg_cmds_process_resp(ptvp, "Sanitize", res, SG_NO_DATA_IN, sense_b,
                                true /*noisy */, op->verbose, &sense_cat);
     if (-1 == ret)
-        ;
+        ret = sg_convert_errno(get_scsi_pt_os_err(ptvp));
     else if (-2 == ret) {
         switch (sense_cat) {
         case SG_LIB_CAT_RECOVERED:
@@ -267,10 +281,10 @@ do_sanitize(int sg_fd, const struct opts_t * op, const void * param_lstp,
 #define TPROTO_ISCSI 5
 
 static char *
-get_lu_name(const unsigned char * bp, int u_len, char * b, int b_len)
+get_lu_name(const uint8_t * bp, int u_len, char * b, int b_len)
 {
     int len, off, sns_dlen, dlen, k;
-    unsigned char u_sns[512];
+    uint8_t u_sns[512];
     char * cp;
 
     len = u_len - 4;
@@ -326,10 +340,10 @@ get_lu_name(const unsigned char * bp, int u_len, char * b, int b_len)
 #define VPD_DEVICE_ID 0x83
 
 static int
-print_dev_id(int fd, unsigned char * sinq_resp, int max_rlen, int verbose)
+print_dev_id(int fd, uint8_t * sinq_resp, int max_rlen, int verbose)
 {
     int res, k, n, verb, pdt, has_sn, has_di;
-    unsigned char b[256];
+    uint8_t b[256];
     char a[256];
     char pdt_name[64];
 
@@ -431,18 +445,20 @@ int
 main(int argc, char * argv[])
 {
     bool got_stdin = false;
-    int sg_fd, k, res, c, infd, progress, vb, n, resp_len;
+    int k, res, c, infd, progress, vb, n, resp_len, err;
+    int sg_fd = -1;
     int param_lst_len = 0;
     int ret = -1;
     const char * device_name = NULL;
     char ebuff[EBUFF_SZ];
     char b[80];
-    unsigned char rsBuff[DEF_REQS_RESP_LEN];
-    unsigned char * wBuff = NULL;
+    uint8_t rsBuff[DEF_REQS_RESP_LEN];
+    uint8_t * wBuff = NULL;
+    uint8_t * free_wBuff = NULL;
     struct opts_t opts;
     struct opts_t * op;
     struct stat a_stat;
-    unsigned char inq_resp[SAFE_STD_INQ_RESP_LEN];
+    uint8_t inq_resp[SAFE_STD_INQ_RESP_LEN];
 
     op = &opts;
     memset(op, 0, sizeof(opts));
@@ -450,8 +466,8 @@ main(int argc, char * argv[])
     while (1) {
         int option_index = 0;
 
-        c = getopt_long(argc, argv, "ABc:CdeFhi:IOp:Qt:T:vVwzZ", long_options,
-                        &option_index);
+        c = getopt_long(argc, argv, "ABc:CdDeFhi:IOp:Qt:T:vVwzZ",
+                        long_options, &option_index);
         if (c == -1)
             break;
 
@@ -474,6 +490,9 @@ main(int argc, char * argv[])
             break;
         case 'd':
             op->desc = true;
+            break;
+        case 'D':
+            op->dry_run = true;
             break;
         case 'e':
             op->early = true;
@@ -507,7 +526,7 @@ main(int argc, char * argv[])
         case 't':
             op->timeout = sg_get_num(optarg);
             if (op->timeout < 0) {
-                pr2serr("bad argument to '--timeout=SEC', want 0 or more\n");
+                pr2serr("bad argument to '--timeout=SECS', want 0 or more\n");
                 return SG_LIB_SYNTAX_ERROR;
             }
             break;
@@ -519,11 +538,12 @@ main(int argc, char * argv[])
             }
             break;
         case 'v':
+            op->verbose_given = true;
             ++op->verbose;
             break;
         case 'V':
-            pr2serr(ME "version: %s\n", version_str);
-            return 0;
+            op->version_given = true;
+            break;
         case 'w':
             op->wait = true;
             break;
@@ -551,8 +571,29 @@ main(int argc, char * argv[])
             return SG_LIB_SYNTAX_ERROR;
         }
     }
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (op->verbose_given && op->version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        op->verbose_given = false;
+        op->version_given = false;
+        op->verbose = 0;
+    } else if (! op->verbose_given) {
+        pr2serr("set '-vv'\n");
+        op->verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", op->verbose);
+#else
+    if (op->verbose_given && op->version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (op->version_given) {
+        pr2serr(ME "version: %s\n", version_str);
+        return 0;
+    }
+
     if (NULL == device_name) {
-        pr2serr("missing device name!\n");
+        pr2serr("Missing device name!\n\n");
         usage();
         return SG_LIB_SYNTAX_ERROR;
     }
@@ -561,29 +602,31 @@ main(int argc, char * argv[])
     if (1 != n) {
         pr2serr("one and only one of '--block', '--crypto', '--fail' or "
                 "'--overwrite' please\n");
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CONTRADICT;
     }
     if (op->overwrite) {
         if (op->zero) {
             if (op->pattern_fn) {
                 pr2serr("confused: both '--pattern=PF' and '--zero' "
                         "options\n");
-                return SG_LIB_SYNTAX_ERROR;
+                return SG_LIB_CONTRADICT;
             }
             op->ipl = 4;
         } else {
             if (NULL == op->pattern_fn) {
                 pr2serr("'--overwrite' requires '--pattern=PF' or '--zero' "
                         "option\n");
-                return SG_LIB_SYNTAX_ERROR;
+                return SG_LIB_CONTRADICT;
             }
             got_stdin = (0 == strcmp(op->pattern_fn, "-"));
             if (! got_stdin) {
                 memset(&a_stat, 0, sizeof(a_stat));
                 if (stat(op->pattern_fn, &a_stat) < 0) {
+                    err = errno;
                     pr2serr("pattern file: unable to stat(%s): %s\n",
-                            op->pattern_fn, safe_strerror(errno));
-                    return SG_LIB_FILE_ERROR;
+                            op->pattern_fn, safe_strerror(err));
+                    ret = sg_convert_errno(err);
+                    goto err_out;
                 }
                 if (op->ipl <= 0) {
                     op->ipl = (int)a_stat.st_size;
@@ -597,16 +640,18 @@ main(int argc, char * argv[])
             if (op->ipl < 1) {
                 pr2serr("'--overwrite' requires '--ipl=LEN' option if can't "
                         "get PF length\n");
-                return SG_LIB_SYNTAX_ERROR;
+                return SG_LIB_CONTRADICT;
             }
         }
     }
 
     sg_fd = sg_cmds_open_device(device_name, false /* rw */, vb);
     if (sg_fd < 0) {
-        pr2serr(ME "open error: %s: %s\n", device_name,
-                safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        if (op->verbose)
+            pr2serr(ME "open error: %s: %s\n", device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
+        goto err_out;
     }
 
     ret = print_dev_id(sg_fd, inq_resp, sizeof(inq_resp), op->verbose);
@@ -615,11 +660,11 @@ main(int argc, char * argv[])
 
     if (op->overwrite) {
         param_lst_len = op->ipl + 4;
-        wBuff = (unsigned char*)calloc(op->ipl + 4, 1);
+        wBuff = (uint8_t*)sg_memalign(op->ipl + 4, 0, &free_wBuff, false);
         if (NULL == wBuff) {
             pr2serr("unable to allocate %d bytes of memory with calloc()\n",
                     op->ipl + 4);
-            ret = SG_LIB_SYNTAX_ERROR;
+            ret = sg_convert_errno(ENOMEM);
             goto err_out;
         }
         if (op->zero) {
@@ -634,22 +679,24 @@ main(int argc, char * argv[])
                     perror("sg_set_binary_mode");
             } else {
                 if ((infd = open(op->pattern_fn, O_RDONLY)) < 0) {
+                    err = errno;
                     snprintf(ebuff, EBUFF_SZ, ME "could not open %s for "
                              "reading", op->pattern_fn);
                     perror(ebuff);
-                    ret = SG_LIB_FILE_ERROR;
+                    ret = sg_convert_errno(err);;
                     goto err_out;
                 } else if (sg_set_binary_mode(infd) < 0)
                     perror("sg_set_binary_mode");
             }
             res = read(infd, wBuff + 4, op->ipl);
             if (res < 0) {
+                err = errno;
                 snprintf(ebuff, EBUFF_SZ, ME "couldn't read from %s",
                          op->pattern_fn);
                 perror(ebuff);
                 if (! got_stdin)
                     close(infd);
-                ret = SG_LIB_FILE_ERROR;
+                ret = sg_convert_errno(err);
                 goto err_out;
             }
             if (res < op->ipl) {
@@ -660,7 +707,7 @@ main(int argc, char * argv[])
             if (! got_stdin)
                 close(infd);
         }
-        wBuff[0] = op->count & 0x1f;;
+        wBuff[0] = op->count & 0x1f;
         if (op->test)
             wBuff[0] |= ((op->test & 0x3) << 5);
         if (op->invert)
@@ -690,7 +737,11 @@ main(int argc, char * argv[])
     }
 
     if ((0 == ret) && (! op->early) && (! op->wait)) {
-        for (k = 0 ;; ++k) {
+        for (k = 0; ;++k) {     /* unbounded, exits via break */
+            if (op->dry_run && (k > 0)) {
+                pr2serr("Due to --dry-run option, leave poll loop\n");
+                break;
+            }
             sleep_for(POLL_DURATION_SECS);
             memset(rsBuff, 0x0, sizeof(rsBuff));
             res = sg_ll_request_sense(sg_fd, op->desc, rsBuff, sizeof(rsBuff),
@@ -720,7 +771,7 @@ main(int argc, char * argv[])
             resp_len = rsBuff[7] + 8;
             if (vb > 2) {
                 pr2serr("Parameter data in hex\n");
-                dStrHexErr((const char *)rsBuff, resp_len, 1);
+                hex2stderr(rsBuff, resp_len, -1);
             }
             progress = -1;
             sg_get_sense_progress_fld(rsBuff, resp_len, &progress);
@@ -738,13 +789,20 @@ main(int argc, char * argv[])
     }
 
 err_out:
-    if (wBuff)
-        free(wBuff);
-    res = sg_cmds_close_device(sg_fd);
-    if (res < 0) {
-        pr2serr("close error: %s\n", safe_strerror(-res));
-        if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+    if (free_wBuff)
+        free(free_wBuff);
+    if (sg_fd >= 0) {
+        res = sg_cmds_close_device(sg_fd);
+        if (res < 0) {
+            pr2serr("close error: %s\n", safe_strerror(-res));
+            if (0 == ret)
+                ret = sg_convert_errno(-res);
+        }
+    }
+    if (0 == op->verbose) {
+        if (! sg_if_can2stderr("sg_sanitize failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

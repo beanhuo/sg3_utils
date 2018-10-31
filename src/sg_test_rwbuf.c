@@ -1,9 +1,9 @@
 /*
  * (c) 2000 Kurt Garloff <garloff at suse dot de>
  * heavily based on Douglas Gilbert's sg_rbuf program.
- * (c) 1999-2017 Douglas Gilbert
+ * (c) 1999-2018 Douglas Gilbert
  *
- * Program to test the SCSI host adapter by issueing
+ * Program to test the SCSI host adapter by issuing
  * write and read operations on a device's buffer
  * and calculating checksums.
  * NOTE: If you can not reserve the buffer of the device
@@ -29,6 +29,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <string.h>
+#include <errno.h>
 #include <getopt.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
@@ -37,13 +38,14 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_io_linux.h"
 #include "sg_unaligned.h"
 #include "sg_pr2serr.h"
 
 
-static const char * version_str = "1.12 20171020";
+static const char * version_str = "1.18 20180628";
 
 #define BPI (signed)(sizeof(int))
 
@@ -62,7 +64,8 @@ static const char * version_str = "1.12 20171020";
 static int base = 0x12345678;
 static int buf_capacity = 0;
 static int buf_granul = 255;
-static unsigned char *cmpbuf = NULL;
+static uint8_t *cmpbuf = NULL;
+static uint8_t *free_cmpbuf = NULL;
 
 
 /* Options */
@@ -87,9 +90,9 @@ static struct option long_options[] = {
 static int
 find_out_about_buffer(int sg_fd)
 {
-        unsigned char rb_cdb[] = {READ_BUFFER, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-        unsigned char rbBuff[RB_DESC_LEN];
-        unsigned char sense_buffer[32];
+        uint8_t rb_cdb[] = {READ_BUFFER, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        uint8_t rbBuff[RB_DESC_LEN];
+        uint8_t sense_buffer[32];
         struct sg_io_hdr io_hdr;
         int k, res;
 
@@ -137,7 +140,7 @@ find_out_about_buffer(int sg_fd)
         }
 
         buf_capacity = sg_get_unaligned_be24(rbBuff + 1);
-        buf_granul = (unsigned char)rbBuff[0];
+        buf_granul = (uint8_t)rbBuff[0];
 #if 0
         printf("READ BUFFER reports: %02x %02x %02x %02x\n",
                rbBuff[0], rbBuff[1], rbBuff[2], rbBuff[3]);
@@ -149,7 +152,7 @@ find_out_about_buffer(int sg_fd)
 }
 
 static int
-mymemcmp (unsigned char *bf1, unsigned char *bf2, int len)
+mymemcmp (uint8_t *bf1, uint8_t *bf2, int len)
 {
         int df;
         for (df = 0; df < len; df++)
@@ -170,7 +173,7 @@ do_checksum(int *buf, int len, bool quiet)
                 if (!quiet) printf ("sg_test_rwbuf: Checksum error (sz=%i):"
                                     " %08x\n", len, sum);
                 if (cmpbuf && !quiet) {
-                        int diff = mymemcmp (cmpbuf, (unsigned char*)buf,
+                        int diff = mymemcmp (cmpbuf, (uint8_t*)buf,
                                              len);
                         printf ("Differ at pos %i/%i:\n", diff, len);
                         for (i = 0; i < 24 && i+diff < len; i++)
@@ -178,7 +181,7 @@ do_checksum(int *buf, int len, bool quiet)
                         printf ("\n");
                         for (i = 0; i < 24 && i+diff < len; i++)
                                 printf (" %02x",
-                                        ((unsigned char*)buf)[i+diff]);
+                                        ((uint8_t*)buf)[i+diff]);
                         printf ("\n");
                 }
                 return 2222;
@@ -223,13 +226,15 @@ void do_fill_buffer (int *buf, int len)
 }
 
 
-int read_buffer (int sg_fd, unsigned size)
+int read_buffer (int sg_fd, unsigned ssize)
 {
         int res, k;
-        unsigned char rb_cdb[] = {READ_BUFFER, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-        int bufSize = size + addread;
-        unsigned char * rbBuff = (unsigned char *)malloc(bufSize);
-        unsigned char sense_buffer[32];
+        uint8_t rb_cdb[] = {READ_BUFFER, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        int bufSize = ssize + addread;
+        uint8_t * free_rbBuff = NULL;
+        uint8_t * rbBuff = (uint8_t *)sg_memalign(bufSize, 0, &free_rbBuff,
+                                                  false);
+        uint8_t sense_buffer[32];
         struct sg_io_hdr io_hdr;
 
         if (NULL == rbBuff)
@@ -278,24 +283,27 @@ int read_buffer (int sg_fd, unsigned size)
                 return res;
         }
 
-        res = do_checksum((int*)rbBuff, size, false);
-        free(rbBuff);
+        res = do_checksum((int*)rbBuff, ssize, false);
+        if (free_rbBuff)
+                free(free_rbBuff);
         return res;
 }
 
-int write_buffer (int sg_fd, unsigned size)
+int write_buffer (int sg_fd, unsigned ssize)
 {
-        unsigned char wb_cdb[] = {WRITE_BUFFER, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-        int bufSize = size + addwrite;
-        unsigned char * wbBuff = (unsigned char *)malloc(bufSize);
-        unsigned char sense_buffer[32];
+        uint8_t wb_cdb[] = {WRITE_BUFFER, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        int bufSize = ssize + addwrite;
+        uint8_t * free_wbBuff = NULL;
+        uint8_t * wbBuff = (uint8_t *)sg_memalign(bufSize, 0, &free_wbBuff,
+                                                  false);
+        uint8_t sense_buffer[32];
         struct sg_io_hdr io_hdr;
         int k, res;
 
         if (NULL == wbBuff)
                 return -1;
         memset(wbBuff, 0, bufSize);
-        do_fill_buffer ((int*)wbBuff, size);
+        do_fill_buffer ((int*)wbBuff, ssize);
         wb_cdb[1] = RWB_MODE_DATA;
         sg_put_unaligned_be24((uint32_t)bufSize, wb_cdb + 6);
         memset(&io_hdr, 0, sizeof(struct sg_io_hdr));
@@ -339,7 +347,8 @@ int write_buffer (int sg_fd, unsigned size)
                 free(wbBuff);
                 return res;
         }
-        free(wbBuff);
+        if (free_wbBuff)
+                free(free_wbBuff);
         return res;
 }
 
@@ -377,11 +386,14 @@ void usage ()
 
 int main (int argc, char * argv[])
 {
+        bool verbose_given = true;
+        bool version_given = true;
         int sg_fd, res;
         const char * device_name = NULL;
         int times = 1;
         int ret = 0;
         int k = 0;
+        int err;
 
         while (1) {
                 int option_index = 0;
@@ -421,11 +433,12 @@ int main (int argc, char * argv[])
                         }
                         break;
                 case 'v':
+                        verbose_given = true;
                         verbose++;
                         break;
                 case 'V':
-                        pr2serr(ME "version: %s\n", version_str);
-                        return 0;
+                        version_given = true;
+                        break;
                 case 'w':
                         addwrite = sg_get_num(optarg);
                         if (-1 == addwrite) {
@@ -478,6 +491,29 @@ int main (int argc, char * argv[])
                         return SG_LIB_SYNTAX_ERROR;
                 }
         }
+
+#ifdef DEBUG
+        pr2serr("In DEBUG mode, ");
+        if (verbose_given && version_given) {
+                pr2serr("but override: '-vV' given, zero verbose and "
+                        "continue\n");
+                verbose_given = false;
+                version_given = false;
+                verbose = 0;
+        } else if (! verbose_given) {
+                pr2serr("set '-vv'\n");
+                verbose = 2;
+        } else
+                pr2serr("keep verbose=%d\n", verbose);
+#else
+        if (verbose_given && version_given)
+                pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+        if (version_given) {
+                pr2serr(ME "version: %s\n", version_str);
+                return 0;
+        }
+
         if (NULL == device_name) {
                 pr2serr("no device name given\n");
                 usage();
@@ -492,8 +528,9 @@ int main (int argc, char * argv[])
 
         sg_fd = open(device_name, O_RDWR | O_NONBLOCK);
         if (sg_fd < 0) {
+                err = errno;
                 perror("sg_test_rwbuf: open error");
-                return SG_LIB_FILE_ERROR;
+                return sg_convert_errno(err);
         }
         ret = find_out_about_buffer(sg_fd);
         if (ret)
@@ -510,7 +547,7 @@ int main (int argc, char * argv[])
                 goto err_out;
         }
 
-        cmpbuf = (unsigned char *)malloc(size);
+        cmpbuf = (uint8_t *)sg_memalign(size, 0, &free_cmpbuf, false);
         for (k = 0; k < times; ++k) {
                 ret = write_buffer (sg_fd, size);
                 if (ret) {
@@ -525,13 +562,13 @@ int main (int argc, char * argv[])
         }
 
 err_out:
-        if (cmpbuf)
-                free(cmpbuf);
+        if (free_cmpbuf)
+                free(free_cmpbuf);
         res = close(sg_fd);
         if (res < 0) {
                 perror(ME "close error");
                 if (0 == ret)
-                        ret = SG_LIB_FILE_ERROR;
+                        ret = sg_convert_errno(errno);
         }
         if ((0 == ret) && (! do_quick))
                 printf ("Success\n");

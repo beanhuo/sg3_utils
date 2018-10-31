@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2017 Douglas Gilbert.
+ * Copyright (c) 2004-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
+#include <errno.h>
 #include <ctype.h>
 #include <getopt.h>
 #define __STDC_FORMAT_MACROS 1
@@ -31,7 +32,7 @@
  * and decodes the response.
  */
 
-static const char * version_str = "1.35 20171011";
+static const char * version_str = "1.42 20180626";
 
 #define MAX_RLUNS_BUFF_LEN (1024 * 1024)
 #define DEF_RLUNS_BUFF_LEN (1024 * 8)
@@ -125,7 +126,7 @@ usage()
  * defines its own "bridge addressing method" in place of the SAM-3
  * "logical addressing method".  */
 static void
-decode_lun(const char * leadin, const unsigned char * lunp, bool lu_cong,
+decode_lun(const char * leadin, const uint8_t * lunp, bool lu_cong,
            int do_hex, int verbose)
 {
     bool next_level, admin_lu_cong;
@@ -320,7 +321,7 @@ decode_lun(const char * leadin, const unsigned char * lunp, bool lu_cong,
 
 #ifdef SG_LIB_LINUX
 static void
-linux2t10_lun(uint64_t linux_lun, unsigned char t10_lun[])
+linux2t10_lun(uint64_t linux_lun, uint8_t t10_lun[])
 {
     int k;
 
@@ -329,10 +330,10 @@ linux2t10_lun(uint64_t linux_lun, unsigned char t10_lun[])
 }
 
 static uint64_t
-t10_2linux_lun(const unsigned char t10_lun[])
+t10_2linux_lun(const uint8_t t10_lun[])
 {
     int k;
-    const unsigned char * cp;
+    const uint8_t * cp;
     uint64_t res;
 
     res = sg_get_unaligned_be16(t10_lun + 6);
@@ -344,11 +345,11 @@ t10_2linux_lun(const unsigned char t10_lun[])
 
 
 static void
-dStrRaw(const char* str, int len)
+dStrRaw(const char * str, int len)
 {
     int k;
 
-    for (k = 0 ; k < len; ++k)
+    for (k = 0; k < len; ++k)
         printf("%c", str[k]);
 }
 
@@ -367,6 +368,8 @@ main(int argc, char * argv[])
     bool test_linux_out = false;
 #endif
     bool trunc;
+    bool verbose_given = false;
+    bool version_given = false;
     int sg_fd, k, m, off, res, c, list_len, len_cap, luns;
     int decode_arg = 0;
     int do_hex = 0;
@@ -379,8 +382,9 @@ main(int argc, char * argv[])
     const char * test_arg = NULL;
     const char * device_name = NULL;
     const char * cp;
-    unsigned char * reportLunsBuff = NULL;
-    unsigned char lun_arr[8];
+    uint8_t * reportLunsBuff = NULL;
+    uint8_t * free_reportLunsBuff = NULL;
+    uint8_t lun_arr[8];
     struct sg_simple_inquiry_resp sir;
 
     while (1) {
@@ -444,11 +448,12 @@ main(int argc, char * argv[])
             test_arg = optarg;
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr("version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
             usage();
@@ -466,6 +471,26 @@ main(int argc, char * argv[])
             usage();
             return SG_LIB_SYNTAX_ERROR;
         }
+    }
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr("version: %s\n", version_str);
+        return 0;
     }
 
     if (test_arg) {
@@ -573,14 +598,14 @@ main(int argc, char * argv[])
     sg_fd = sg_cmds_open_device(device_name, o_readonly, verbose);
     if (sg_fd < 0) {
         pr2serr("open error: %s: %s\n", device_name, safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        return sg_convert_errno(-sg_fd);
     }
     if (decode_arg && (! lu_cong_arg_given)) {
         if (verbose > 1)
             pr2serr("in order to decode LUN and since --lu_cong not given, "
                     "do standard\nINQUIRY to find LU_CONG bit\n");
         /* check if LU_CONG set in standard INQUIRY response */
-        res = sg_simple_inquiry(sg_fd, &sir, 0, verbose);
+        res = sg_simple_inquiry(sg_fd, &sir, false, verbose);
         ret = res;
         if (res) {
             pr2serr("fetching standard INQUIRY response failed\n");
@@ -593,10 +618,11 @@ main(int argc, char * argv[])
 
     if (0 == maxlen)
         maxlen = DEF_RLUNS_BUFF_LEN;
-    reportLunsBuff = (unsigned char *)calloc(1, maxlen);
+    reportLunsBuff = (uint8_t *)sg_memalign(maxlen, 0, &free_reportLunsBuff,
+                                            verbose > 3);
     if (NULL == reportLunsBuff) {
-        pr2serr("unable to malloc %d bytes\n", maxlen);
-        return SG_LIB_CAT_OTHER;
+        pr2serr("unable to sg_memalign %d bytes\n", maxlen);
+        return sg_convert_errno(ENOMEM);
     }
     trunc = false;
 
@@ -613,7 +639,7 @@ main(int argc, char * argv[])
             goto the_end;
         }
         if (1 == do_hex) {
-            dStrHex((const char *)reportLunsBuff, len_cap, 1);
+            hex2stdout(reportLunsBuff, len_cap, 1);
             goto the_end;
         }
         luns = (list_len / 8);
@@ -628,8 +654,7 @@ main(int argc, char * argv[])
         }
         if (verbose > 1) {
             pr2serr("\nOutput response in hex\n");
-            dStrHexErr((const char *)reportLunsBuff,
-                       (trunc ? maxlen : list_len + 8), 1);
+            hex2stderr(reportLunsBuff, (trunc ? maxlen : list_len + 8), 1);
         }
         for (k = 0, off = 8; k < luns; ++k, off += 8) {
             if (! do_quiet) {
@@ -670,13 +695,18 @@ main(int argc, char * argv[])
     }
 
 the_end:
-    if (reportLunsBuff)
-        free(reportLunsBuff);
+    if (free_reportLunsBuff)
+        free(free_reportLunsBuff);
     res = sg_cmds_close_device(sg_fd);
     if (res < 0) {
         pr2serr("close error: %s\n", safe_strerror(-res));
         if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+            return sg_convert_errno(-res);
+    }
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_luns failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' or '-vv' for "
+                    "more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

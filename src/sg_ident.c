@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005-2017 Douglas Gilbert.
+ * Copyright (c) 2005-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -31,7 +31,7 @@
  * DEVICE IDENTIFIER and SET DEVICE IDENTIFIER prior to spc4r07.
  */
 
-static const char * version_str = "1.17 20171008";
+static const char * version_str = "1.22 20180626";
 
 #define ME "sg_ident: "
 
@@ -51,7 +51,7 @@ static struct option long_options[] = {
 };
 
 static void
-decode_ii(const unsigned char * iip, int ii_len, int itype, bool ascii,
+decode_ii(const uint8_t * iip, int ii_len, int itype, bool ascii,
           bool raw, int verbose)
 {
     int k;
@@ -83,7 +83,7 @@ decode_ii(const unsigned char * iip, int ii_len, int itype, bool ascii,
             if (ascii)
                 printf("%.*s\n", ii_len, (const char *)iip);
             else
-                dStrHex((const char *)iip, ii_len, 0);
+                hex2stdout(iip, ii_len, 0);
         }
     }
 }
@@ -115,16 +115,18 @@ usage(void)
 int
 main(int argc, char * argv[])
 {
-    int sg_fd, res, c, ii_len;
-    unsigned char rdi_buff[REPORT_ID_INFO_SANITY_LEN + 4];
-    char b[80];
-    unsigned char * bp = NULL;
-    int itype = 0;
-    int verbose = 0;
     bool ascii = false;
     bool do_clear = false;
     bool raw = false;
     bool do_set = false;
+    bool verbose_given = false;
+    bool version_given = false;
+    int sg_fd, res, c, ii_len;
+    uint8_t rdi_buff[REPORT_ID_INFO_SANITY_LEN + 4];
+    char b[80];
+    uint8_t * bp = NULL;
+    int itype = 0;
+    int verbose = 0;
     const char * device_name = NULL;
     int ret = 0;
 
@@ -161,11 +163,12 @@ main(int argc, char * argv[])
             do_set = true;
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr(ME "version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
             usage();
@@ -185,30 +188,51 @@ main(int argc, char * argv[])
         }
     }
 
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr(ME "version: %s\n", version_str);
+        return 0;
+    }
+
     if (NULL == device_name) {
-        pr2serr("missing device name!\n");
+        pr2serr("missing device name!\n\n");
         usage();
         return SG_LIB_SYNTAX_ERROR;
     }
     if (do_set && do_clear) {
         pr2serr("only one of '--clear' and '--set' can be given\n");
         usage();
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CONTRADICT;
     }
     if (ascii && raw) {
         pr2serr("only one of '--ascii' and '--raw' can be given\n");
         usage();
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CONTRADICT;
     }
     if ((do_set || do_clear) && (raw || ascii)) {
         pr2serr("'--set' cannot be used with either '--ascii' or '--raw'\n");
         usage();
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CONTRADICT;
     }
     sg_fd = sg_cmds_open_device(device_name, false /* rw=false */, verbose);
     if (sg_fd < 0) {
         pr2serr(ME "open error: %s: %s\n", device_name, safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        return sg_convert_errno(-sg_fd);
     }
 
     memset(rdi_buff, 0x0, sizeof(rdi_buff));
@@ -279,7 +303,12 @@ err_out:
     if (res < 0) {
         pr2serr("close error: %s\n", safe_strerror(-res));
         if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+            ret = sg_convert_errno(-res);
+    }
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_ident failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' or '-vv' for "
+                    "more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

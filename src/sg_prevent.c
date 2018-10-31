@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2017 Douglas Gilbert.
+ * Copyright (c) 2004-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -27,21 +27,23 @@
  * given SCSI device.
  */
 
-static const char * version_str = "1.10 20171006";
+static const char * version_str = "1.12 20180627";
 
 #define ME "sg_prevent: "
 
 
 static struct option long_options[] = {
-        {"allow", no_argument, 0, 'a'},
-        {"help", no_argument, 0, 'h'},
-        {"prevent", required_argument, 0, 'p'},
-        {"verbose", no_argument, 0, 'v'},
-        {"version", no_argument, 0, 'V'},
-        {0, 0, 0, 0},
+    {"allow", no_argument, 0, 'a'},
+    {"help", no_argument, 0, 'h'},
+    {"prevent", required_argument, 0, 'p'},
+    {"verbose", no_argument, 0, 'v'},
+    {"version", no_argument, 0, 'V'},
+    {0, 0, 0, 0},
 };
 
-static void usage()
+
+static void
+usage()
 {
     pr2serr("Usage: "
             "sg_prevent [--allow] [--help] [--prevent=PC] [--verbose] "
@@ -61,10 +63,13 @@ static void usage()
 
 }
 
-int main(int argc, char * argv[])
+int
+main(int argc, char * argv[])
 {
-    int sg_fd, res, c;
     bool allow = false;
+    bool verbose_given = false;
+    bool version_given = false;
+    int sg_fd, res, c;
     int prevent = -1;
     int verbose = 0;
     const char * device_name = NULL;
@@ -94,11 +99,12 @@ int main(int argc, char * argv[])
             }
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr(ME "version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
             usage();
@@ -117,6 +123,27 @@ int main(int argc, char * argv[])
             return SG_LIB_SYNTAX_ERROR;
         }
     }
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr(ME "version: %s\n", version_str);
+        return 0;
+    }
+
     if (NULL == device_name) {
         pr2serr("missing device name!\n");
         usage();
@@ -125,7 +152,7 @@ int main(int argc, char * argv[])
     if (allow && (prevent >= 0)) {
         pr2serr("can't give both '--allow' and '--prevent='\n");
         usage();
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CONTRADICT;
     }
     if (allow)
         prevent = 0;
@@ -134,9 +161,11 @@ int main(int argc, char * argv[])
 
     sg_fd = sg_cmds_open_device(device_name, false /* rw */, verbose);
     if (sg_fd < 0) {
-        pr2serr(ME "open error: %s: %s\n", device_name,
-                safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        if (verbose)
+            pr2serr(ME "open error: %s: %s\n", device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
+        goto fini;
     }
     res = sg_ll_prevent_allow(sg_fd, prevent, true, verbose);
     ret = res;
@@ -150,7 +179,13 @@ int main(int argc, char * argv[])
     if (res < 0) {
         pr2serr("close error: %s\n", safe_strerror(-res));
         if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+            ret = sg_convert_errno(-res);
+    }
+fini:
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_prevent failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

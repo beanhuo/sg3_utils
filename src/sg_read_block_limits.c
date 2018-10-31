@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2017 Douglas Gilbert.
+ * Copyright (c) 2009-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -19,6 +19,7 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_cmds_basic.h"
 #include "sg_cmds_extra.h"
@@ -32,11 +33,11 @@
  * SCSI device.
  */
 
-static const char * version_str = "1.06 20171006";
+static const char * version_str = "1.08 20180219";
 
 #define MAX_READ_BLOCK_LIMITS_LEN 6
 
-static unsigned char readBlkLmtBuff[MAX_READ_BLOCK_LIMITS_LEN];
+static uint8_t readBlkLmtBuff[MAX_READ_BLOCK_LIMITS_LEN];
 
 
 static struct option long_options[] = {
@@ -70,25 +71,27 @@ usage()
 }
 
 static void
-dStrRaw(const char* str, int len)
+dStrRaw(const char * str, int len)
 {
     int k;
 
-    for (k = 0 ; k < len; ++k)
+    for (k = 0; k < len; ++k)
         printf("%c", str[k]);
 }
 
 int
 main(int argc, char * argv[])
 {
+    bool do_raw = false;
+    bool readonly = false;
+    bool verbose_given = false;
+    bool version_given = false;
     int sg_fd, k, m, res, c;
     int do_hex = 0;
     int verbose = 0;
     int ret = 0;
     uint32_t max_block_size;
     uint16_t min_block_size;
-    bool do_raw = false;
-    bool readonly = false;
     const char * device_name = NULL;
 
     while (1) {
@@ -114,11 +117,12 @@ main(int argc, char * argv[])
             readonly = true;
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr("version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         default:
             pr2serr("invalid option -%c ??\n", c);
             usage();
@@ -137,6 +141,26 @@ main(int argc, char * argv[])
             return SG_LIB_SYNTAX_ERROR;
         }
     }
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr("version: %s\n", version_str);
+        return 0;
+    }
 
     if (NULL == device_name) {
         pr2serr("missing device name!\n");
@@ -146,8 +170,11 @@ main(int argc, char * argv[])
 
     sg_fd = sg_cmds_open_device(device_name, readonly, verbose);
     if (sg_fd < 0) {
-        pr2serr("open error: %s: %s\n", device_name, safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        if (verbose)
+            pr2serr("open error: %s: %s\n", device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
+        goto the_end2;
     }
 
     memset(readBlkLmtBuff, 0x0, 6);
@@ -155,7 +182,7 @@ main(int argc, char * argv[])
     ret = res;
     if (0 == res) {
       if (do_hex) {
-        dStrHex((const char *)readBlkLmtBuff, sizeof(readBlkLmtBuff), 1);
+        hex2stdout(readBlkLmtBuff, sizeof(readBlkLmtBuff), 1);
         goto the_end;
       } else if (do_raw) {
         dStrRaw((const char *)readBlkLmtBuff, sizeof(readBlkLmtBuff));
@@ -194,7 +221,13 @@ the_end:
     if (res < 0) {
         pr2serr("close error: %s\n", safe_strerror(-res));
         if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+            ret = sg_convert_errno(-res);
+    }
+the_end2:
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_read_block_limits failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' or '-vv' for "
+                    "more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005-2017 Douglas Gilbert.
+ * Copyright (c) 2005-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -17,6 +17,7 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_cmds_basic.h"
 #include "sg_cmds_extra.h"
@@ -30,7 +31,7 @@
  * to the given SCSI device.
  */
 
-static const char * version_str = "1.14 20171006";
+static const char * version_str = "1.18 20180628";
 
 #define SERIAL_NUM_SANITY_LEN (16 * 1024)
 
@@ -64,11 +65,14 @@ int main(int argc, char * argv[])
 {
     bool raw = false;
     bool readonly = false;
-    int sg_fd, res, c, sn_len, n;
+    bool verbose_given = false;
+    bool version_given = false;
+    int res, c, sn_len, n;
+    int sg_fd = -1;
     int ret = 0;
     int verbose = 0;
-    unsigned char rmsn_buff[4];
-    unsigned char * bp = NULL;
+    uint8_t rmsn_buff[4];
+    uint8_t * bp = NULL;
     const char * device_name = NULL;
 
     while (1) {
@@ -91,11 +95,12 @@ int main(int argc, char * argv[])
             readonly = true;
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr("version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
             usage();
@@ -114,6 +119,26 @@ int main(int argc, char * argv[])
             return SG_LIB_SYNTAX_ERROR;
         }
     }
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr("version: %s\n", version_str);
+        return 0;
+    }
 
     if (NULL == device_name) {
         pr2serr("missing device name!\n");
@@ -129,8 +154,11 @@ int main(int argc, char * argv[])
 
     sg_fd = sg_cmds_open_device(device_name, readonly, verbose);
     if (sg_fd < 0) {
-        pr2serr("open error: %s: %s\n", device_name, safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        if (verbose)
+            pr2serr("open error: %s: %s\n", device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
+        goto err_out;
     }
 
     memset(rmsn_buff, 0x0, sizeof(rmsn_buff));
@@ -152,7 +180,7 @@ int main(int argc, char * argv[])
             goto err_out;
         }
         sn_len += 4;
-        bp = (unsigned char *)malloc(sn_len);
+        bp = (uint8_t *)malloc(sn_len);
         if (NULL == bp) {
             pr2serr("    Out of memory (ram)\n");
             goto err_out;
@@ -168,7 +196,7 @@ int main(int argc, char * argv[])
             } else {
                 printf("Serial number:\n");
                 if (sn_len > 0)
-                    dStrHex((const char *)bp + 4, sn_len, 0);
+                    hex2stdout(bp + 4, sn_len, 0);
             }
         }
     }
@@ -184,11 +212,18 @@ int main(int argc, char * argv[])
 err_out:
     if (bp)
         free(bp);
-    res = sg_cmds_close_device(sg_fd);
-    if (res < 0) {
-        pr2serr("close error: %s\n", safe_strerror(-res));
-        if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+    if (sg_fd >= 0) {
+        res = sg_cmds_close_device(sg_fd);
+        if (res < 0) {
+            pr2serr("close error: %s\n", safe_strerror(-res));
+            if (0 == ret)
+                ret = sg_convert_errno(-res);
+        }
+    }
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_rmsn failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

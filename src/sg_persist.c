@@ -1,5 +1,5 @@
 /* A utility program originally written for the Linux OS SCSI subsystem.
- *  Copyright (C) 2004-2017 D. Gilbert
+ *  Copyright (C) 2004-2018 D. Gilbert
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
  *  the Free Software Foundation; either version 2, or (at your option)
@@ -12,10 +12,12 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <string.h>
 #include <ctype.h>
+#include <errno.h>
 #include <getopt.h>
 #define __STDC_FORMAT_MACROS 1
 
@@ -24,13 +26,14 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_cmds_basic.h"
 #include "sg_cmds_extra.h"
 #include "sg_unaligned.h"
 #include "sg_pr2serr.h"
 
-static const char * version_str = "0.57 20171012";
+static const char * version_str = "0.66 20180615";
 
 
 #define PRIN_RKEY_SA     0x0
@@ -50,6 +53,8 @@ static const char * version_str = "0.57 20171012";
 #define MX_TIDS 32
 #define MX_TID_LEN 256
 
+#define ME "sg_persist"
+
 #define SG_PERSIST_IN_RDONLY "SG_PERSIST_IN_RDONLY"
 
 struct opts_t {
@@ -61,51 +66,73 @@ struct opts_t {
     bool readonly;
     bool readwrite_force;/* set when '-yy' given. Ooverrides environment
                             variable SG_PERSIST_IN_RDONLY and opens RW */
+    bool verbose_given;
+    bool version_given;
     int hex;
     int num_transportids;
     int prin_sa;
     int prout_sa;
     int verbose;
-    unsigned int alloc_len;
-    unsigned int param_rtp;
-    unsigned int prout_type;
+    uint32_t alloc_len;
+    uint32_t param_rtp;
+    uint32_t prout_type;
     uint64_t param_rk;
     uint64_t param_sark;
-    unsigned char transportid_arr[MX_TIDS * MX_TID_LEN];
+    uint8_t transportid_arr[MX_TIDS * MX_TID_LEN];
 };
 
 
 static struct option long_options[] = {
     {"alloc-length", required_argument, 0, 'l'},
+    {"alloc_length", required_argument, 0, 'l'},
     {"clear", no_argument, 0, 'C'},
     {"device", required_argument, 0, 'd'},
     {"help", no_argument, 0, 'h'},
     {"hex", no_argument, 0, 'H'},
     {"in", no_argument, 0, 'i'},
+    {"maxlen", required_argument, 0, 'm'},
     {"no-inquiry", no_argument, 0, 'n'},
+    {"no_inquiry", no_argument, 0, 'n'},
     {"out", no_argument, 0, 'o'},
     {"param-alltgpt", no_argument, 0, 'Y'},
+    {"param_alltgpt", no_argument, 0, 'Y'},
     {"param-aptpl", no_argument, 0, 'Z'},
+    {"param_aptpl", no_argument, 0, 'Z'},
     {"param-rk", required_argument, 0, 'K'},
+    {"param_rk", required_argument, 0, 'K'},
     {"param-sark", required_argument, 0, 'S'},
+    {"param_sark", required_argument, 0, 'S'},
     {"param-unreg", no_argument, 0, 'U'},
+    {"param_unreg", no_argument, 0, 'U'},
     {"preempt", no_argument, 0, 'P'},
     {"preempt-abort", no_argument, 0, 'A'},
+    {"preempt_abort", no_argument, 0, 'A'},
     {"prout-type", required_argument, 0, 'T'},
+    {"prout_type", required_argument, 0, 'T'},
     {"read-full-status", no_argument, 0, 's'},
+    {"read_full_status", no_argument, 0, 's'},
     {"read-keys", no_argument, 0, 'k'},
+    {"read_keys", no_argument, 0, 'k'},
     {"readonly", no_argument, 0, 'y'},
     {"read-reservation", no_argument, 0, 'r'},
+    {"read_reservation", no_argument, 0, 'r'},
     {"read-status", no_argument, 0, 's'},
+    {"read_status", no_argument, 0, 's'},
     {"register", no_argument, 0, 'G'},
     {"register-ignore", no_argument, 0, 'I'},
+    {"register_ignore", no_argument, 0, 'I'},
     {"register-move", no_argument, 0, 'M'},
+    {"register_move", no_argument, 0, 'M'},
     {"release", no_argument, 0, 'L'},
     {"relative-target-port", required_argument, 0, 'Q'},
+    {"relative_target_port", required_argument, 0, 'Q'},
     {"replace-lost", no_argument, 0, 'z'},
+    {"replace_lost", no_argument, 0, 'z'},
     {"report-capabilities", no_argument, 0, 'c'},
+    {"report_capabilities", no_argument, 0, 'c'},
     {"reserve", no_argument, 0, 'R'},
     {"transport-id", required_argument, 0, 'X'},
+    {"transport_id", required_argument, 0, 'X'},
     {"unreg", no_argument, 0, 'U'},
     {"verbose", no_argument, 0, 'v'},
     {"version", no_argument, 0, 'V'},
@@ -122,8 +149,7 @@ static const char * prin_sa_strs[] = {
     "[reserved 0x6]",
     "[reserved 0x7]",
 };
-static const int num_prin_sa_strs = sizeof(prin_sa_strs) /
-                                    sizeof(prin_sa_strs[0]);
+static const int num_prin_sa_strs = SG_ARRAY_SIZE(prin_sa_strs);
 
 static const char * prout_sa_strs[] = {
     "Register",
@@ -137,8 +163,7 @@ static const char * prout_sa_strs[] = {
     "Replace lost reservation",
     "[reserved 0x9]",
 };
-static const int num_prout_sa_strs = sizeof(prout_sa_strs) /
-                                     sizeof(prout_sa_strs[0]);
+static const int num_prout_sa_strs = SG_ARRAY_SIZE(prout_sa_strs);
 
 static const char * pr_type_strs[] = {
     "obsolete [0]",
@@ -209,6 +234,10 @@ usage(int help)
                 "                                 an argument\n"
                 "    --hex|-H                   output response in hex (for "
                 "PR In commands)\n"
+                "    --maxlen=LEN|-m LEN        allocation length in "
+                "decimal, by default.\n"
+                "                               like --alloc-len= "
+                "(def: 8192, 8k, 2000h)\n"
                 "    --no-inquiry|-n            skip INQUIRY (default: do "
                 "INQUIRY)\n"
                 "    --param-alltgpt|-Y         PR Out parameter "
@@ -243,12 +272,20 @@ usage(int help)
 static int
 prin_work(int sg_fd, const struct opts_t * op)
 {
-    int k, j, num, res, add_len, add_desc_len;
+    int k, j, num, add_len, add_desc_len;
+    int res = 0;
     unsigned int pr_gen;
-    unsigned char * bp;
-    unsigned char pr_buff[MX_ALLOC_LEN];
+    uint8_t * bp;
+    uint8_t * pr_buff = NULL;
+    uint8_t * free_pr_buff = NULL;
 
-    memset(pr_buff, 0, sizeof(pr_buff));
+    pr_buff = sg_memalign(op->alloc_len, 0 /* page aligned */, &free_pr_buff,
+                          false);
+    if (NULL == pr_buff) {
+        pr2serr("%s: unable to allocate %d bytes on heap\n", __func__,
+                op->alloc_len);
+        return sg_convert_errno(ENOMEM);
+    }
     res = sg_ll_persistent_reserve_in(sg_fd, op->prin_sa, pr_buff,
                                       op->alloc_len, true, op->verbose);
     if (res) {
@@ -269,19 +306,22 @@ prin_work(int sg_fd, const struct opts_t * op)
             sg_get_category_sense_str(res, sizeof(bb), bb, op->verbose);
             pr2serr("PR in (%s): %s\n", b, bb);
         }
-        return res;
+        goto fini;
     }
     if (PRIN_RCAP_SA == op->prin_sa) {
         if (8 != pr_buff[1]) {
             pr2serr("Unexpected response for PRIN Report Capabilities\n");
             if (op->hex)
-                dStrHex((const char *)pr_buff, pr_buff[1], 1);
-            return SG_LIB_CAT_MALFORMED;
+                hex2stdout(pr_buff, pr_buff[1], 1);
+            res = SG_LIB_CAT_MALFORMED;
+            goto fini;
         }
         if (op->hex)
-            dStrHex((const char *)pr_buff, 8, 1);
+            hex2stdout(pr_buff, 8, 1);
         else {
             printf("Report capabilities response:\n");
+            printf("  Replace Lost Reservation Capable(RLR_C): %d\n",
+                   !!(pr_buff[2] & 0x80));      /* added spc4r26 */
             printf("  Compatible Reservation Handling(CRH): %d\n",
                    !!(pr_buff[2] & 0x10));
             printf("  Specify Initiator Ports Capable(SIP_C): %d\n",
@@ -297,17 +337,17 @@ prin_work(int sg_fd, const struct opts_t * op)
             if (pr_buff[3] & 0x80) {
                 printf("    Support indicated in Type mask:\n");
                 printf("      %s: %d\n", pr_type_strs[7],
-                       !!(pr_buff[4] & 0x80));
+                       !!(pr_buff[4] & 0x80));  /* WR_EX_AR */
                 printf("      %s: %d\n", pr_type_strs[6],
-                       !!(pr_buff[4] & 0x40));
+                       !!(pr_buff[4] & 0x40));  /* EX_AC_RO */
                 printf("      %s: %d\n", pr_type_strs[5],
-                       !!(pr_buff[4] & 0x20));
+                       !!(pr_buff[4] & 0x20));  /* WR_EX_RO */
                 printf("      %s: %d\n", pr_type_strs[3],
-                       !!(pr_buff[4] & 0x8));
+                       !!(pr_buff[4] & 0x8));   /* EX_AC */
                 printf("      %s: %d\n", pr_type_strs[1],
-                       !!(pr_buff[4] & 0x2));
+                       !!(pr_buff[4] & 0x2));   /* WR_EX */
                 printf("      %s: %d\n", pr_type_strs[8],
-                       !!(pr_buff[5] & 0x1));
+                       !!(pr_buff[5] & 0x1));   /* EX_AC_AR */
             }
         }
     } else {
@@ -315,20 +355,18 @@ prin_work(int sg_fd, const struct opts_t * op)
         add_len = sg_get_unaligned_be32(pr_buff + 4);
         if (op->hex) {
             if (op->hex > 1)
-                dStrHex((const char *)pr_buff, add_len + 8,
-                        ((2 == op->hex) ? 1 : -1));
+                hex2stdout(pr_buff, add_len + 8, ((2 == op->hex) ? 1 : -1));
             else {
                 printf("  PR generation=0x%x, ", pr_gen);
                 if (add_len <= 0)
                     printf("Additional length=%d\n", add_len);
-                if (add_len > ((int)sizeof(pr_buff) - 8)) {
+                if ((uint32_t)add_len > (op->alloc_len - 8)) {
                     printf("Additional length too large=%d, truncate\n",
                            add_len);
-                    dStrHex((const char *)(pr_buff + 8), sizeof(pr_buff) - 8,
-                            1);
+                    hex2stdout((pr_buff + 8), op->alloc_len - 8, 1);
                 } else {
                     printf("Additional length=%d\n", add_len);
-                    dStrHex((const char *)(pr_buff + 8), add_len, 1);
+                    hex2stdout((pr_buff + 8), add_len, 1);
                 }
             }
         } else if (PRIN_RKEY_SA == op->prin_sa) {
@@ -400,7 +438,10 @@ prin_work(int sg_fd, const struct opts_t * op)
             }
         }
     }
-    return 0;
+fini:
+    if (free_pr_buff)
+        free(free_pr_buff);
+    return res;
 }
 
 /* Compact the 2 dimensional transportid_arr into a one dimensional
@@ -410,7 +451,7 @@ compact_transportid_array(struct opts_t * op)
 {
     int k, off, protocol_id, len;
     int compact_len = 0;
-    unsigned char * bp = op->transportid_arr;
+    uint8_t * bp = op->transportid_arr;
 
     for (k = 0, off = 0; ((k < op->num_transportids) && (k < MX_TIDS));
          ++k, off += MX_TID_LEN) {
@@ -435,13 +476,21 @@ compact_transportid_array(struct opts_t * op)
 static int
 prout_work(int sg_fd, struct opts_t * op)
 {
-    int len, res, t_arr_len;
-    unsigned char pr_buff[MX_ALLOC_LEN];
+    int len, t_arr_len;
+    int res = 0;
+    uint8_t * pr_buff = NULL;
+    uint8_t * free_pr_buff = NULL;
     char b[64];
     char bb[80];
 
     t_arr_len = compact_transportid_array(op);
-    memset(pr_buff, 0, sizeof(pr_buff));
+    pr_buff = sg_memalign(op->alloc_len, 0 /* page aligned */, &free_pr_buff,
+                          false);
+    if (NULL == pr_buff) {
+        pr2serr("%s: unable to allocate %d bytes on heap\n", __func__,
+                op->alloc_len);
+        return sg_convert_errno(ENOMEM);
+    }
     sg_put_unaligned_be64(op->param_rk, pr_buff + 0);
     sg_put_unaligned_be64(op->param_sark, pr_buff + 8);
     if (op->param_alltgpt)
@@ -473,21 +522,32 @@ prout_work(int sg_fd, struct opts_t * op)
                 sg_get_category_sense_str(res, sizeof(bb), bb, op->verbose);
                 pr2serr("PR out (%s): %s\n", b, bb);
             }
-            return res;
+            goto fini;
         } else if (op->verbose)
             pr2serr("PR out: command (%s) successful\n", b);
     }
-    return 0;
+fini:
+    if (free_pr_buff)
+        free(free_pr_buff);
+    return res;
 }
 
 static int
 prout_reg_move_work(int sg_fd, struct opts_t * op)
 {
-    int len, res, t_arr_len;
-    unsigned char pr_buff[MX_ALLOC_LEN];
+    int len, t_arr_len;
+    int res = 0;
+    uint8_t * pr_buff = NULL;
+    uint8_t * free_pr_buff = NULL;
 
     t_arr_len = compact_transportid_array(op);
-    memset(pr_buff, 0, sizeof(pr_buff));
+    pr_buff = sg_memalign(op->alloc_len, 0 /* page aligned */, &free_pr_buff,
+                          false);
+    if (NULL == pr_buff) {
+        pr2serr("%s: unable to allocate %d bytes on heap\n", __func__,
+                op->alloc_len);
+        return sg_convert_errno(ENOMEM);
+    }
     sg_put_unaligned_be64(op->param_rk, pr_buff + 0);
     sg_put_unaligned_be64(op->param_sark, pr_buff + 8);
     if (op->param_unreg)
@@ -516,16 +576,19 @@ prout_reg_move_work(int sg_fd, struct opts_t * op)
             sg_get_category_sense_str(res, sizeof(bb), bb, op->verbose);
             pr2serr("PR out (register and move): %s\n", bb);
         }
-        return res;
+        goto fini;
     } else if (op->verbose)
         pr2serr("PR out: 'register and move' command successful\n");
-    return 0;
+fini:
+    if (free_pr_buff)
+        free(free_pr_buff);
+    return res;
 }
 
 /* Decode various symbolic forms of TransportIDs into SPC-4 format.
  * Returns 1 if one found, else returns 0. */
 static int
-decode_sym_transportid(const char * lcp, unsigned char * tidp)
+decode_sym_transportid(const char * lcp, uint8_t * tidp)
 {
     int k, j, n, b, c, len, alen;
     unsigned int ui;
@@ -685,7 +748,7 @@ decode_file_tids(const char * fnp, struct opts_t * op)
     unsigned int h;
     FILE * fp = stdin;
     const char * lcp;
-    unsigned char * tid_arr = op->transportid_arr;
+    uint8_t * tid_arr = op->transportid_arr;
     char line[1024];
     char carry_over[4];
 
@@ -812,7 +875,7 @@ build_transportid(const char * inp, struct opts_t * op)
     int k = 0;
     unsigned int h;
     const char * lcp;
-    unsigned char * tid_arr = op->transportid_arr;
+    uint8_t * tid_arr = op->transportid_arr;
     char * cp;
     char * c2p;
 
@@ -834,14 +897,14 @@ build_transportid(const char * inp, struct opts_t * op)
             goto my_cont_b;
         k = strspn(inp, "0123456789aAbBcCdDeEfF, ");
         if (in_len != k) {
-            pr2serr("build_transportid: error at pos %d\n", k + 1);
+            pr2serr("%s: error at pos %d\n", __func__, k + 1);
             return 1;
         }
         for (k = 0; k < (int)sizeof(op->transportid_arr); ++k) {
             if (1 == sscanf(lcp, "%x", &h)) {
                 if (h > 0xff) {
-                    pr2serr("build_transportid: hex number larger than 0xff "
-                            "at pos %d\n", (int)(lcp - inp + 1));
+                    pr2serr("%s: hex number larger than 0xff at pos %d\n",
+                            __func__, (int)(lcp - inp + 1));
                     return 1;
                 }
                 tid_arr[k] = h;
@@ -855,7 +918,7 @@ build_transportid(const char * inp, struct opts_t * op)
                     cp = c2p;
                 lcp = cp + 1;
             } else {
-                pr2serr("build_transportid: error at pos %d\n",
+                pr2serr("%s: error at pos %d\n", __func__,
                         (int)(lcp - inp + 1));
                 return 1;
             }
@@ -863,7 +926,7 @@ build_transportid(const char * inp, struct opts_t * op)
 my_cont_b:
         op->num_transportids = 1;
         if (k >= (int)sizeof(op->transportid_arr)) {
-            pr2serr("build_transportid: array length exceeded\n");
+            pr2serr("%s: array length exceeded\n", __func__);
             return 1;
         }
     }
@@ -874,14 +937,17 @@ my_cont_b:
 int
 main(int argc, char * argv[])
 {
+    bool got_maxlen, ok;
+    bool flagged = false;
     bool want_prin = false;
     bool want_prout = false;
-    int sg_fd, c, k, res;
+    int c, k, res;
     int help = 0;
     int num_prin_sa = 0;
     int num_prout_sa = 0;
     int num_prout_param = 0;
     int peri_type = 0;
+    int sg_fd = -1;
     int ret = 0;
     const char * cp;
     const char * device_name = NULL;
@@ -901,7 +967,8 @@ main(int argc, char * argv[])
     while (1) {
         int option_index = 0;
 
-        c = getopt_long(argc, argv, "AcCd:GHhiIkK:l:LMnoPQ:rRsS:T:UvVX:yYzZ",
+        c = getopt_long(argc, argv,
+                        "AcCd:GHhiIkK:l:Lm:MnoPQ:rRsS:T:UvVX:yYzZ",
                         long_options, &option_index);
         if (c == -1)
             break;
@@ -950,13 +1017,22 @@ main(int argc, char * argv[])
             }
             ++num_prout_param;
             break;
+        case 'm':       /* --maxlen= and --alloc_length= are similar */
         case 'l':
-            if (1 != sscanf(optarg, "%x", &op->alloc_len)) {
-                pr2serr("bad argument to '--alloc-length'\n");
+            got_maxlen = ('m' == c);
+            cp =  (got_maxlen ? "maxlen" : "alloc-length");
+            if (got_maxlen) {
+                k = sg_get_num(optarg);
+                ok = (-1 != k);
+                op->alloc_len = (unsigned int)k;
+            } else
+                ok = (1 == sscanf(optarg, "%x", &op->alloc_len));
+            if (! ok) {
+                pr2serr("bad argument to '--%s'\n", cp);
                 return SG_LIB_SYNTAX_ERROR;
             } else if (MX_ALLOC_LEN < op->alloc_len) {
-                pr2serr("'--alloc-length' argument exceeds maximum value "
-                        "(%d)\n", MX_ALLOC_LEN);
+                pr2serr("'--%s' argument exceeds maximum value (%d)\n", cp,
+                        MX_ALLOC_LEN);
                 return SG_LIB_SYNTAX_ERROR;
             }
             break;
@@ -1020,11 +1096,12 @@ main(int argc, char * argv[])
             op->param_unreg = true;
             break;
         case 'v':
+            op->verbose_given = true;
             ++op->verbose;
             break;
         case 'V':
-            pr2serr("version: %s\n", version_str);
-            return 0;
+            op->version_given = true;
+            break;
         case 'X':
             if (0 != build_transportid(optarg, op)) {
                 pr2serr("bad argument to '--transport-id'\n");
@@ -1078,6 +1155,27 @@ main(int argc, char * argv[])
         usage(help);
         return 0;
     }
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (op->verbose_given && op->version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and "
+                "continue\n");
+        op->verbose_given = false;
+        op->version_given = false;
+        op->verbose = 0;
+    } else if (! op->verbose_given) {
+        pr2serr("set '-vv'\n");
+        op->verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", op->verbose);
+#else
+    if (op->verbose_given && op->version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (op->version_given) {
+        pr2serr("version: %s\n", version_str);
+        return 0;
+    }
 
     if (NULL == device_name) {
         pr2serr("No device name given\n");
@@ -1087,21 +1185,21 @@ main(int argc, char * argv[])
     if (want_prout && want_prin) {
         pr2serr("choose '--in' _or_ '--out' (not both)\n");
         usage(1);
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CONTRADICT;
     } else if (want_prout) { /* syntax check on PROUT arguments */
         op->pr_in = false;
         if ((1 != num_prout_sa) || (0 != num_prin_sa)) {
             pr2serr(">> For Persistent Reserve Out one and only one "
                     "appropriate\n>> service action must be chosen (e.g. "
                     "'--register')\n");
-            return SG_LIB_SYNTAX_ERROR;
+            return SG_LIB_CONTRADICT;
         }
     } else { /* syntax check on PRIN arguments */
         if (num_prout_sa > 0) {
             pr2serr(">> When a service action for Persistent Reserve Out "
                     "is chosen the\n>> '--out' option must be given (as a "
                     "safeguard)\n");
-            return SG_LIB_SYNTAX_ERROR;
+            return SG_LIB_CONTRADICT;
         }
         if (0 == num_prin_sa) {
             pr2serr(">> No service action given; assume Persistent Reserve "
@@ -1111,7 +1209,7 @@ main(int argc, char * argv[])
         } else if (num_prin_sa > 1)  {
             pr2serr("Too many service actions given; choose one only\n");
             usage(1);
-            return SG_LIB_SYNTAX_ERROR;
+            return SG_LIB_CONTRADICT;
         }
     }
     if ((op->param_unreg || op->param_rtp) &&
@@ -1119,14 +1217,14 @@ main(int argc, char * argv[])
         pr2serr("--unreg or --relative-target-port only useful with "
                 "--register-move\n");
         usage(1);
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CONTRADICT;
     }
     if ((PROUT_REG_MOVE_SA == op->prout_sa) &&
         (1 != op->num_transportids)) {
         pr2serr("with --register-move one (and only one) --transport-id "
                 "should be given\n");
         usage(1);
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CONTRADICT;
     }
     if (((PROUT_RES_SA == op->prout_sa) ||
          (PROUT_REL_SA == op->prout_sa) ||
@@ -1137,7 +1235,7 @@ main(int argc, char * argv[])
     }
     if ((op->verbose > 2) && op->num_transportids) {
         char b[1024];
-        unsigned char * bp;
+        uint8_t * bp;
 
         pr2serr("number of tranport-ids decoded from command line (or "
                 "stdin): %d\n", op->num_transportids);
@@ -1152,11 +1250,14 @@ main(int argc, char * argv[])
     if (op->inquiry) {
         if ((sg_fd = sg_cmds_open_device(device_name, true /* ro */,
                                          op->verbose)) < 0) {
-            pr2serr("sg_persist: error opening file (ro): %s: %s\n",
+            pr2serr("%s: error opening file (ro): %s: %s\n", ME,
                     device_name, safe_strerror(-sg_fd));
-            return SG_LIB_FILE_ERROR;
+            ret = sg_convert_errno(-sg_fd);
+            flagged = true;
+            goto fini;
         }
-        if (0 == sg_simple_inquiry(sg_fd, &inq_resp, true, op->verbose)) {
+        ret = sg_simple_inquiry(sg_fd, &inq_resp, true, op->verbose);
+        if (0 == ret) {
             printf("  %.8s  %.16s  %.4s\n", inq_resp.vendor, inq_resp.product,
                    inq_resp.revision);
             peri_type = inq_resp.peripheral_type;
@@ -1166,9 +1267,15 @@ main(int argc, char * argv[])
             else
                 printf("  Peripheral device type: 0x%x\n", peri_type);
         } else {
-            printf("sg_persist: %s doesn't respond to a SCSI INQUIRY\n",
-                   device_name);
-            return SG_LIB_CAT_OTHER;
+            printf("%s: SCSI INQUIRY failed on %s", ME, device_name);
+            if (ret < 0) {
+                ret = -ret;
+                printf(": %s\n", safe_strerror(ret));
+                ret = sg_convert_errno(ret);
+            } else
+                printf("\n");
+            flagged = true;
+            goto fini;
         }
         sg_cmds_close_device(sg_fd);
     }
@@ -1180,11 +1287,13 @@ main(int argc, char * argv[])
                                      which is open(RW) */
     } else
         op->readonly = false;      /* '-yy' force open(RW) */
-    if ((sg_fd = sg_cmds_open_device(device_name, op->readonly,
-                                     op->verbose)) < 0) {
-        pr2serr("sg_persist: error opening file (rw): %s: %s\n", device_name,
-                safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+    sg_fd = sg_cmds_open_device(device_name, op->readonly, op->verbose);
+    if (sg_fd < 0) {
+        pr2serr("%s: error opening file %s (r%s): %s\n", ME, device_name,
+                (op->readonly ? "o" : "w"), safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
+        flagged = true;
+        goto fini;
     }
 
     if (op->pr_in)
@@ -1194,11 +1303,18 @@ main(int argc, char * argv[])
     else /* PROUT commands other than 'register and move' */
         ret = prout_work(sg_fd, op);
 
-    res = sg_cmds_close_device(sg_fd);
-    if (res < 0) {
-        pr2serr("close error: %s\n", safe_strerror(-res));
-        if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+fini:
+    if (ret && (0 == op->verbose) && (! flagged)) {
+        if (! sg_if_can2stderr("sg_persist failed: ", ret))
+            pr2serr("Some error occurred [%d]\n", ret);
+    }
+    if (sg_fd >= 0) {
+        res = sg_cmds_close_device(sg_fd);
+        if (res < 0) {
+            pr2serr("close error: %s\n", safe_strerror(-res));
+            if (0 == ret)
+                ret = sg_convert_errno(-res);
+        }
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

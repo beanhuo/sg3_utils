@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2007-2017 Douglas Gilbert.
+ * Copyright (c) 2007-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
  */
 
-/* sg_pt_solaris version 1.06 20171030 */
+/* sg_pt_solaris version 1.09 20180202 */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,12 +24,12 @@
 #include <sys/scsi/impl/types.h>
 #include <sys/scsi/impl/uscsi.h>
 
-#include "sg_pt.h"
-#include "sg_lib.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
+#include "sg_pt.h"
+#include "sg_lib.h"
 
 
 #define DEF_TIMEOUT 60       /* 60 seconds */
@@ -39,6 +39,8 @@ struct sg_pt_solaris_scsi {
     int max_sense_len;
     int in_err;
     int os_err;
+    bool is_nvme;
+    int dev_fd;
 };
 
 struct sg_pt_base {
@@ -89,6 +91,25 @@ scsi_pt_close_device(int device_fd)
 }
 
 struct sg_pt_base *
+construct_scsi_pt_obj_with_fd(int dev_fd, int verbose)
+{
+    struct sg_pt_solaris_scsi * ptp;
+
+    ptp = (struct sg_pt_solaris_scsi *)
+          calloc(1, sizeof(struct sg_pt_solaris_scsi));
+    if (ptp) {
+        ptp->dev_fd = (dev_fd < 0) ? -1 : devfd;
+        ptp->is_nvme = false;
+        ptp->uscsi.uscsi_timeout = DEF_TIMEOUT;
+        ptp->uscsi.uscsi_flags = USCSI_READ | USCSI_ISOLATE | USCSI_RQENABLE;
+        ptp->uscsi.uscsi_timeout = DEF_TIMEOUT;
+    } else if (verbose)
+        fprintf(sg_warnings_strm ? sg_warnings_strm : stderr,
+                "%s: calloc() out of memory\n", __func__);
+    return (struct sg_pt_base *)ptp;
+}
+
+struct sg_pt_base *
 construct_scsi_pt_obj()
 {
     struct sg_pt_solaris_scsi * ptp;
@@ -126,7 +147,7 @@ clear_scsi_pt_obj(struct sg_pt_base * vp)
 }
 
 void
-set_scsi_pt_cdb(struct sg_pt_base * vp, const unsigned char * cdb,
+set_scsi_pt_cdb(struct sg_pt_base * vp, const uint8_t * cdb,
                 int cdb_len)
 {
     struct sg_pt_solaris_scsi * ptp = &vp->impl;
@@ -138,7 +159,7 @@ set_scsi_pt_cdb(struct sg_pt_base * vp, const unsigned char * cdb,
 }
 
 void
-set_scsi_pt_sense(struct sg_pt_base * vp, unsigned char * sense,
+set_scsi_pt_sense(struct sg_pt_base * vp, uint8_t * sense,
                   int max_sense_len)
 {
     struct sg_pt_solaris_scsi * ptp = &vp->impl;
@@ -153,7 +174,7 @@ set_scsi_pt_sense(struct sg_pt_base * vp, unsigned char * sense,
 
 /* from device */
 void
-set_scsi_pt_data_in(struct sg_pt_base * vp, unsigned char * dxferp,
+set_scsi_pt_data_in(struct sg_pt_base * vp, uint8_t * dxferp,
                     int dxfer_len)
 {
     struct sg_pt_solaris_scsi * ptp = &vp->impl;
@@ -169,7 +190,7 @@ set_scsi_pt_data_in(struct sg_pt_base * vp, unsigned char * dxferp,
 
 /* to device */
 void
-set_scsi_pt_data_out(struct sg_pt_base * vp, const unsigned char * dxferp,
+set_scsi_pt_data_out(struct sg_pt_base * vp, const uint8_t * dxferp,
                      int dxfer_len)
 {
     struct sg_pt_solaris_scsi * ptp = &vp->impl;
@@ -236,33 +257,49 @@ int
 do_scsi_pt(struct sg_pt_base * vp, int fd, int time_secs, int verbose)
 {
     struct sg_pt_solaris_scsi * ptp = &vp->impl;
+    FILE * ferr = sg_warnings_strm ? sg_warnings_strm : stderr;
 
     ptp->os_err = 0;
     if (ptp->in_err) {
         if (verbose)
-            fprintf(sg_warnings_strm ? sg_warnings_strm : stderr,
-                    "Replicated or unused set_scsi_pt... functions\n");
+            fprintf(ferr, "Replicated or unused set_scsi_pt... functions\n");
         return SCSI_PT_DO_BAD_PARAMS;
+    }
+    if (fd < 0) {
+        if (ptp->dev_fd < 0) {
+            if (verbose)
+                fprintf(ferr, "%s: No device file descriptor given\n",
+                        __func__);
+            return SCSI_PT_DO_BAD_PARAMS;
+        }
+    } else {
+        if (ptp->dev_fd >= 0) {
+            if (fd != ptp->dev_fd) {
+                if (verbose)
+                    fprintf(ferr, "%s: file descriptor given to create and "
+                            "this differ\n", __func__);
+                return SCSI_PT_DO_BAD_PARAMS;
+            }
+        } else
+            ptp->dev_fd = fd;
     }
     if (NULL == ptp->uscsi.uscsi_cdb) {
         if (verbose)
-            fprintf(sg_warnings_strm ? sg_warnings_strm : stderr,
-                    "No SCSI command (cdb) given\n");
+            fprintf(ferr, "%s: No SCSI command (cdb) given\n", __func__);
         return SCSI_PT_DO_BAD_PARAMS;
     }
     if (time_secs > 0)
         ptp->uscsi.uscsi_timeout = time_secs;
 
-    if (ioctl(fd, USCSICMD, &ptp->uscsi)) {
+    if (ioctl(ptp->dev_fd, USCSICMD, &ptp->uscsi)) {
         ptp->os_err = errno;
         if ((EIO == ptp->os_err) && ptp->uscsi.uscsi_status) {
             ptp->os_err = 0;
             return 0;
         }
         if (verbose)
-            fprintf(sg_warnings_strm ? sg_warnings_strm : stderr,
-                    "ioctl(USCSICMD) failed with os_err (errno) = %d\n",
-                    ptp->os_err);
+            fprintf(ferr, "%s: ioctl(USCSICMD) failed with os_err (errno) "
+                    "= %d\n", __func__, ptp->os_err);
         return -ptp->os_err;
     }
     return 0;
@@ -328,8 +365,17 @@ get_scsi_pt_transport_err(const struct sg_pt_base * vp)
 {
     // const struct sg_pt_solaris_scsi * ptp = &vp->impl;
 
-    vp = vp;            /* ignore and suppress warning */
+    if (vp) { ; }            /* ignore and suppress warning */
     return 0;
+}
+
+void
+set_scsi_pt_transport_err(struct sg_pt_base * vp, int err)
+{
+    // const struct sg_pt_solaris_scsi * ptp = &vp->impl;
+
+    if (vp) { ; }            /* ignore and suppress warning */
+    if (err) { ; }           /* ignore and suppress warning */
 }
 
 int
@@ -345,8 +391,7 @@ pt_device_is_nvme(const struct sg_pt_base * vp)
 {
     const struct sg_pt_solaris_scsi * ptp = &vp->impl;
 
-    if (vp) { ; }       /* suppress warings */
-    return false;
+    return ptp ? ptp->is_nvme : false;
 }
 
 char *

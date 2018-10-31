@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006-2017 Douglas Gilbert.
+ * Copyright (c) 2006-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -51,6 +51,8 @@
 #define VPD_VP_HP3PAR 4
 #define VPD_VP_IBM_LTO 5
 #define VPD_VP_HP_LTO 6
+#define VPD_VP_NVME 7
+#define VPD_VP_SG 8     /* this package/library as a vendor */
 
 
 /* vendor VPD pages */
@@ -80,6 +82,10 @@
 #define VPD_V_VAC_RDAC 0xc9
 #define VPD_V_RVSI_RDAC 0xca
 #define VPD_V_SAID_RDAC 0xd0
+
+#ifndef SG_NVME_VPD_NICR
+#define SG_NVME_VPD_NICR 0xde   /* NVME Identify Controller Response */
+#endif
 
 
 #define DEF_ALLOC_LEN 252
@@ -116,11 +122,11 @@ struct svpd_values_name_t {
     const char * name;
 };
 
-int vpd_fetch_page_from_dev(int sg_fd, unsigned char * rp, int page,
-                            int mxlen, int vb, int * rlenp);
+int vpd_fetch_page(int sg_fd, uint8_t * rp, int page, int mxlen,
+                   bool qt, int vb, int * rlenp);
 
 /* sharing large global buffer, defined in sg_vpd.c */
-extern unsigned char rsp_buff[];
+extern uint8_t * rsp_buff;
 
 /* end of section copied from sg_vpd.c . Maybe sg_vpd.h is needed */
 
@@ -141,6 +147,8 @@ static struct svpd_vp_name_t vp_arr[] = {
     {VPD_VP_HP_LTO, "hp_lto", "HP LTO tape/systems"},
     {VPD_VP_RDAC, "rdac", "RDAC array (NetApp E-Series)"},
     {VPD_VP_SEAGATE, "sea", "Seagate disk"},
+    {VPD_VP_NVME, "nvme", "NVMe related"},
+    {VPD_VP_SG, "sg", "sg3_utils extensions"},
     {0, NULL, NULL},
 };
 
@@ -150,21 +158,21 @@ static struct svpd_vp_name_t vp_arr[] = {
 static struct svpd_values_name_t vendor_vpd_pg[] = {
     {VPD_V_ACI_LTO, VPD_VP_HP_LTO, 1, "aci", "ACI revision level (HP LTO)"},
     {VPD_V_DATC_SEA, VPD_VP_SEAGATE, 0, "datc", "Date code (Seagate)"},
-    {VPD_V_DCRL_LTO, VPD_VP_IBM_LTO, 1, "dcrl" , "Drive component revision "
+    {VPD_V_DCRL_LTO, VPD_VP_IBM_LTO, 1, "dcrl", "Drive component revision "
      "levels (IBM LTO)"},
     {VPD_V_FVER_DDS, VPD_VP_DDS, 1, "ddsver", "Firmware revision (DDS)"},
     {VPD_V_DEV_BEH_SEA, VPD_VP_SEAGATE, 0, "devb", "Device behavior "
      "(Seagate)"},
-    {VPD_V_DSN_LTO, VPD_VP_IBM_LTO, 1, "dsn" , "Drive serial numbers (IBM "
+    {VPD_V_DSN_LTO, VPD_VP_IBM_LTO, 1, "dsn", "Drive serial numbers (IBM "
      "LTO)"},
-    {VPD_V_DUCD_LTO, VPD_VP_IBM_LTO, 1, "ducd" , "Device unique "
+    {VPD_V_DUCD_LTO, VPD_VP_IBM_LTO, 1, "ducd", "Device unique "
      "configuration data (IBM LTO)"},
     {VPD_V_EDID_RDAC, VPD_VP_RDAC, 0, "edid", "Extended device "
      "identification (RDAC)"},
     {VPD_V_FEAT_RDAC, VPD_VP_RDAC, 0, "prm4", "Feature Parameters (RDAC)"},
     {VPD_V_FIRM_SEA, VPD_VP_SEAGATE, 0, "firm", "Firmware numbers "
      "(Seagate)"},
-    {VPD_V_FVER_LTO, VPD_VP_HP_LTO, 0, "frl" , "Firmware revision level "
+    {VPD_V_FVER_LTO, VPD_VP_HP_LTO, 0, "frl", "Firmware revision level "
      "(HP LTO)"},
     {VPD_V_FVER_RDAC, VPD_VP_RDAC, 0, "fwr4", "Firmware version (RDAC)"},
     {VPD_V_HEAD_LTO, VPD_VP_HP_LTO, 1, "head", "Head Assy revision level "
@@ -177,8 +185,10 @@ static struct svpd_values_name_t vendor_vpd_pg[] = {
     {VPD_V_JUMP_SEA, VPD_VP_SEAGATE, 0, "jump", "Jump setting (Seagate)"},
     {VPD_V_MECH_LTO, VPD_VP_HP_LTO, 1, "mech", "Mechanism revision level "
      "(HP LTO)"},
-    {VPD_V_MPDS_LTO, VPD_VP_IBM_LTO, 1, "mpds" , "Mode parameter default "
+    {VPD_V_MPDS_LTO, VPD_VP_IBM_LTO, 1, "mpds", "Mode parameter default "
      "settings (IBM LTO)"},
+    {SG_NVME_VPD_NICR, VPD_VP_SG, 0, "nicr",
+     "NVMe Identify Controller Response (sg3_utils)"},
     {VPD_V_PCA_LTO, VPD_VP_HP_LTO, 1, "pca", "PCA revision level (HP LTO)"},
     {VPD_V_RVSI_RDAC, VPD_VP_RDAC, 0, "rvsi", "Replicated volume source "
      "identifier (RDAC)"},
@@ -358,16 +368,16 @@ svpd_count_vendor_vpds(int vpd_pn, int vend_prod_num)
 }
 
 static void
-dStrRaw(const char* str, int len)
+dStrRaw(const uint8_t * str, int len)
 {
     int k;
 
-    for (k = 0 ; k < len; ++k)
+    for (k = 0; k < len; ++k)
         printf("%c", str[k]);
 }
 
 static void
-decode_vpd_c0_hp3par(unsigned char * buff, int len)
+decode_vpd_c0_hp3par(uint8_t * buff, int len)
 {
     int rev;
     long offset;
@@ -427,7 +437,7 @@ decode_vpd_c0_hp3par(unsigned char * buff, int len)
 
 
 static void
-decode_firm_vpd_c0_sea(unsigned char * buff, int len)
+decode_firm_vpd_c0_sea(uint8_t * buff, int len)
 {
     if (len < 28) {
         pr2serr("Seagate firmware numbers VPD page length too short=%d\n",
@@ -461,7 +471,7 @@ decode_firm_vpd_c0_sea(unsigned char * buff, int len)
 }
 
 static void
-decode_date_code_vpd_c1_sea(unsigned char * buff, int len)
+decode_date_code_vpd_c1_sea(uint8_t * buff, int len)
 {
     if (len < 20) {
         pr2serr("Seagate Data code VPD page length too short=%d\n",
@@ -473,7 +483,7 @@ decode_date_code_vpd_c1_sea(unsigned char * buff, int len)
 }
 
 static void
-decode_dev_beh_vpd_c3_sea(unsigned char * buff, int len)
+decode_dev_beh_vpd_c3_sea(uint8_t * buff, int len)
 {
     if (len < 25) {
         pr2serr("Seagate Device behaviour VPD page length too short=%d\n",
@@ -536,7 +546,7 @@ static const char * failover_mode_arr[] =
 };
 
 static void
-decode_upr_vpd_c0_emc(unsigned char * buff, int len)
+decode_upr_vpd_c0_emc(uint8_t * buff, int len)
 {
     int k, ip_mgmt, vpp80, lun_z;
 
@@ -554,7 +564,7 @@ decode_upr_vpd_c0_emc(unsigned char * buff, int len)
         printf("%02x", buff[10 + k]);
     printf("\n");
     printf("  Array Serial Number: ");
-    dStrRaw((const char *)&buff[50], buff[49]);
+    dStrRaw(&buff[50], buff[49]);
     printf("\n");
 
     printf("  LUN State: ");
@@ -610,7 +620,7 @@ decode_upr_vpd_c0_emc(unsigned char * buff, int len)
 }
 
 static void
-decode_rdac_vpd_c0(unsigned char * buff, int len)
+decode_rdac_vpd_c0(uint8_t * buff, int len)
 {
     int memsize;
     char name[65];
@@ -656,7 +666,7 @@ decode_rdac_vpd_c0(unsigned char * buff, int len)
 }
 
 static void
-decode_rdac_vpd_c1(unsigned char * buff, int len)
+decode_rdac_vpd_c1(uint8_t * buff, int len)
 {
     int i, n, v, r, m, p, d, y, num_part;
     char part[5];
@@ -698,7 +708,7 @@ decode_rdac_vpd_c1(unsigned char * buff, int len)
 }
 
 static void
-decode_rdac_vpd_c2(unsigned char * buff, int len)
+decode_rdac_vpd_c2(uint8_t * buff, int len)
 {
     int i, n, v, r, m, p, d, y, num_part;
     char part[5];
@@ -753,7 +763,7 @@ decode_rdac_vpd_c2(unsigned char * buff, int len)
 }
 
 static void
-decode_rdac_vpd_c3(unsigned char * buff, int len)
+decode_rdac_vpd_c3(uint8_t * buff, int len)
 {
     if (len < 0x2c) {
         pr2serr("Feature parameters VPD page length too short=%d\n", len);
@@ -775,7 +785,7 @@ decode_rdac_vpd_c3(unsigned char * buff, int len)
 }
 
 static void
-decode_rdac_vpd_c4(unsigned char * buff, int len)
+decode_rdac_vpd_c4(uint8_t * buff, int len)
 {
     char subsystem_id[17];
     char subsystem_rev[5];
@@ -845,7 +855,7 @@ decode_rdac_vpd_c4(unsigned char * buff, int len)
 }
 
 static void
-convert_binary_to_ascii(unsigned char * src, unsigned char * dst,  int len)
+convert_binary_to_ascii(uint8_t * src, uint8_t * dst,  int len)
 {
     int i;
 
@@ -855,7 +865,7 @@ convert_binary_to_ascii(unsigned char * src, unsigned char * dst,  int len)
 }
 
 static void
-decode_rdac_vpd_c8(unsigned char * buff, int len)
+decode_rdac_vpd_c8(uint8_t * buff, int len)
 {
     int i;
 #ifndef SG_LIB_MINGW
@@ -866,7 +876,7 @@ decode_rdac_vpd_c8(unsigned char * buff, int len)
     int label_len;
     char uuid[33];
     int uuid_len;
-    unsigned char port_id[128];
+    uint8_t port_id[128];
     int n;
 
     if (len < 0xab) {
@@ -966,7 +976,7 @@ decode_rdac_vpd_c8(unsigned char * buff, int len)
 }
 
 static void
-decode_rdac_vpd_c9_rtpg_data(unsigned char aas, unsigned char vendor)
+decode_rdac_vpd_c9_rtpg_data(uint8_t aas, uint8_t vendor)
 {
     printf("  Asymmetric Access State:");
     switch(aas & 0x0F) {
@@ -1028,7 +1038,7 @@ decode_rdac_vpd_c9_rtpg_data(unsigned char aas, unsigned char vendor)
 }
 
 static void
-decode_rdac_vpd_c9(unsigned char * buff, int len)
+decode_rdac_vpd_c9(uint8_t * buff, int len)
 {
     if (len < 3) {
         pr2serr("Volume Access Control VPD page length too short=%d\n", len);
@@ -1132,7 +1142,7 @@ decode_rdac_vpd_c9(unsigned char * buff, int len)
 }
 
 static void
-decode_rdac_vpd_ca(unsigned char * buff, int len)
+decode_rdac_vpd_ca(uint8_t * buff, int len)
 {
     int i;
 
@@ -1165,7 +1175,7 @@ decode_rdac_vpd_ca(unsigned char * buff, int len)
 }
 
 static void
-decode_rdac_vpd_d0(unsigned char * buff, int len)
+decode_rdac_vpd_d0(uint8_t * buff, int len)
 {
     int i;
 
@@ -1184,7 +1194,7 @@ decode_rdac_vpd_d0(unsigned char * buff, int len)
 
 
 static void
-decode_dds_vpd_c0(unsigned char * buff, int len)
+decode_dds_vpd_c0(uint8_t * buff, int len)
 {
     char firmware_rev[25];
     char build_date[43];
@@ -1217,7 +1227,7 @@ decode_dds_vpd_c0(unsigned char * buff, int len)
 }
 
 static void
-decode_hp_lto_vpd_cx(unsigned char * buff, int len, int page)
+decode_hp_lto_vpd_cx(uint8_t * buff, int len, int page)
 {
     char str[32];
     const char *comp = NULL;
@@ -1272,7 +1282,7 @@ decode_hp_lto_vpd_cx(unsigned char * buff, int len, int page)
 }
 
 static void
-decode_ibm_lto_dcrl(unsigned char * buff, int len)
+decode_ibm_lto_dcrl(uint8_t * buff, int len)
 {
     if (len < 0x2b) {
         pr2serr("Driver Component Revision Levels page (IBM LTO) invalid "
@@ -1286,7 +1296,7 @@ decode_ibm_lto_dcrl(unsigned char * buff, int len)
 }
 
 static void
-decode_ibm_lto_dsn(unsigned char * buff, int len)
+decode_ibm_lto_dsn(uint8_t * buff, int len)
 {
     if (len < 0x1c) {
         pr2serr("Driver Serial Numbers page (IBM LTO) invalid "
@@ -1297,7 +1307,7 @@ decode_ibm_lto_dsn(unsigned char * buff, int len)
     printf("  Reported serial number: %.12s\n", buff + 16);
 }
 
-/* Returns 0 if successful, see sg_ll_inquiry() plus SG_LIB_SYNTAX_ERROR for
+/* Returns 0 if successful, see sg_ll_inquiry() plus SG_LIB_CAT_OTHER for
    unsupported page */
 int
 svpd_decode_vendor(int sg_fd, struct opts_t * op, int off)
@@ -1306,7 +1316,7 @@ svpd_decode_vendor(int sg_fd, struct opts_t * op, int off)
     char name[64];
     const struct svpd_values_name_t * vnp;
     int alloc_len = op->maxlen;
-    unsigned char * rp;
+    uint8_t * rp;
 
     switch (op->vpd_pn) {
     case 0xc0:
@@ -1321,14 +1331,14 @@ svpd_decode_vendor(int sg_fd, struct opts_t * op, int off)
     case 0xd0:
         break;
     default:    /* not known so return prior to fetching page */
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CAT_OTHER;
     }
     rp = rsp_buff + off;
     if (sg_fd >= 0) {
         if (0 == alloc_len)
             alloc_len = DEF_ALLOC_LEN;
     }
-    res = vpd_fetch_page_from_dev(sg_fd, rp, op->vpd_pn, alloc_len,
+    res = vpd_fetch_page(sg_fd, rp, op->vpd_pn, alloc_len, op->do_quiet,
                                   op->verbose, &len);
     if (0 == res) {
         vnp = svpd_get_v_detail(op->vpd_pn, op->vend_prod_num, 0xf & rp[0]);
@@ -1340,10 +1350,9 @@ svpd_decode_vendor(int sg_fd, struct opts_t * op, int off)
         if ((! op->do_raw) && (! op->do_quiet) && (op->do_hex < 2))
             printf("%s VPD Page:\n", name);
         if (op->do_raw)
-            dStrRaw((const char *)rp, len);
+            dStrRaw(rp, len);
         else if (op->do_hex)
-            dStrHex((const char *)rp, len,
-                    ((1 == op->do_hex) ? 0 : -1));
+            hex2stdout(rp, len, ((1 == op->do_hex) ? 0 : -1));
         else {
             switch(op->vpd_pn) {
                 case 0xc0:
@@ -1362,7 +1371,7 @@ svpd_decode_vendor(int sg_fd, struct opts_t * op, int off)
                     else if (VPD_VP_HP_LTO == op->vend_prod_num)
                         decode_hp_lto_vpd_cx(rp, len, op->vpd_pn);
                     else
-                        dStrHex((const char *)rp, len, 0);
+                        hex2stdout(rp, len, 0);
                     break;
                 case 0xc1:
                     if (VPD_VP_SEAGATE == op->vend_prod_num)
@@ -1374,7 +1383,7 @@ svpd_decode_vendor(int sg_fd, struct opts_t * op, int off)
                     else if (VPD_VP_HP_LTO == op->vend_prod_num)
                         decode_hp_lto_vpd_cx(rp, len, op->vpd_pn);
                     else
-                        dStrHex((const char *)rp, len, 0);
+                        hex2stdout(rp, len, 0);
                     break;
                 case 0xc2:
                     if (VPD_VP_RDAC == op->vend_prod_num)
@@ -1382,7 +1391,7 @@ svpd_decode_vendor(int sg_fd, struct opts_t * op, int off)
                     else if (VPD_VP_HP_LTO == op->vend_prod_num)
                         decode_hp_lto_vpd_cx(rp, len, op->vpd_pn);
                     else
-                        dStrHex((const char *)rp, len, 0);
+                        hex2stdout(rp, len, 0);
                     break;
                 case 0xc3:
                     if (VPD_VP_SEAGATE == op->vend_prod_num)
@@ -1392,7 +1401,7 @@ svpd_decode_vendor(int sg_fd, struct opts_t * op, int off)
                     else if (VPD_VP_HP_LTO == op->vend_prod_num)
                         decode_hp_lto_vpd_cx(rp, len, op->vpd_pn);
                     else
-                        dStrHex((const char *)rp, len, 0);
+                        hex2stdout(rp, len, 0);
                     break;
                 case 0xc4:
                     if (VPD_VP_RDAC == op->vend_prod_num)
@@ -1400,42 +1409,42 @@ svpd_decode_vendor(int sg_fd, struct opts_t * op, int off)
                     else if (VPD_VP_HP_LTO == op->vend_prod_num)
                         decode_hp_lto_vpd_cx(rp, len, op->vpd_pn);
                     else
-                        dStrHex((const char *)rp, len, 0);
+                        hex2stdout(rp, len, 0);
                     break;
                 case 0xc5:
                     if (VPD_VP_HP_LTO == op->vend_prod_num)
                         decode_hp_lto_vpd_cx(rp, len, op->vpd_pn);
                     else
-                        dStrHex((const char *)rp, len, 0);
+                        hex2stdout(rp, len, 0);
                     break;
                 case 0xc8:
                     if (VPD_VP_RDAC == op->vend_prod_num)
                         decode_rdac_vpd_c8(rp, len);
                     else
-                        dStrHex((const char *)rp, len, 0);
+                        hex2stdout(rp, len, 0);
                     break;
                 case 0xc9:
                     if (VPD_VP_RDAC == op->vend_prod_num)
                         decode_rdac_vpd_c9(rp, len);
                     else
-                        dStrHex((const char *)rp, len, 0);
+                        hex2stdout(rp, len, 0);
                     break;
                 case 0xca:
                     if (VPD_VP_RDAC == op->vend_prod_num)
                         decode_rdac_vpd_ca(rp, len);
                     else
-                        dStrHex((const char *)rp, len, 0);
+                        hex2stdout(rp, len, 0);
                     break;
                 case 0xd0:
                     if (VPD_VP_RDAC == op->vend_prod_num)
                         decode_rdac_vpd_d0(rp, len);
                     else
-                        dStrHex((const char *)rp, len, 0);
+                        hex2stdout(rp, len, 0);
                     break;
                 default:
                     pr2serr("%s: logic error, should know can't decode "
                             "pn=0x%x\n", __func__, op->vpd_pn);
-                    return SG_LIB_SYNTAX_ERROR;
+                    return SG_LIB_CAT_OTHER;
             }
             return 0;
         }

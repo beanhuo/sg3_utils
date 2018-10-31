@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2017 Hannes Reinecke, SUSE Labs
+ * Copyright (c) 2011-2018 Hannes Reinecke, SUSE Labs
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -38,12 +38,11 @@
    and the optional list identifier passed as the list_id argument.
 */
 
-static const char * version_str = "1.16 20171010";
+static const char * version_str = "1.23 20180625";
 
 
 #define MAX_XFER_LEN 10000
 
-/* #define SG_DEBUG */
 
 #define ME "sg_copy_results: "
 
@@ -104,7 +103,7 @@ struct descriptor_type segment_descriptor_codes [] = {
 
 
 static void
-scsi_failed_segment_details(unsigned char *rcBuff, unsigned int rcBuffLen)
+scsi_failed_segment_details(uint8_t *rcBuff, unsigned int rcBuffLen)
 {
     int senseLen;
     unsigned int len;
@@ -131,7 +130,7 @@ scsi_failed_segment_details(unsigned char *rcBuff, unsigned int rcBuffLen)
 }
 
 static void
-scsi_copy_status(unsigned char *rcBuff, unsigned int rcBuffLen)
+scsi_copy_status(uint8_t *rcBuff, unsigned int rcBuffLen)
 {
     unsigned int len;
 
@@ -167,7 +166,7 @@ scsi_copy_status(unsigned char *rcBuff, unsigned int rcBuffLen)
 }
 
 static void
-scsi_operating_parameters(unsigned char *rcBuff, unsigned int rcBuffLen)
+scsi_operating_parameters(uint8_t *rcBuff, unsigned int rcBuffLen)
 {
     unsigned int len, n;
 
@@ -306,14 +305,18 @@ main(int argc, char * argv[])
 {
     bool do_hex = false;
     bool o_readonly = false;
-    int sg_fd, res, c, k;
+    bool verbose_given = false;
+    bool version_given = false;
+    int res, c, k;
     int ret = 1;
     int sa = 3;
+    int sg_fd = -1;
     int verbose = 0;
     int xfer_len = 520;
     uint32_t list_id = 0;
     const char * cp;
-    unsigned char * cpResultBuff = NULL;
+    uint8_t * cpResultBuff = NULL;
+    uint8_t * free_cprb = NULL;
     const char * device_name = NULL;
     char file_name[256];
 
@@ -359,10 +362,11 @@ main(int argc, char * argv[])
             break;
         case 'v':
             ++verbose;
+            verbose_given = true;
             break;
         case 'V':
-            pr2serr(ME "version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         case 'x':
             xfer_len = sg_get_num(optarg);
             if (-1 == xfer_len) {
@@ -389,8 +393,29 @@ main(int argc, char * argv[])
         }
     }
 
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr(ME "version: %s\n", version_str);
+        return 0;
+    }
+
     if (NULL == device_name) {
-        pr2serr("missing device name!\n");
+        pr2serr("missing device name!\n\n");
         usage();
         return SG_LIB_SYNTAX_ERROR;
     }
@@ -401,21 +426,23 @@ main(int argc, char * argv[])
         return SG_LIB_SYNTAX_ERROR;
     }
 
-    if (NULL == (cpResultBuff = (unsigned char *)malloc(xfer_len))) {
+    cpResultBuff = (uint8_t *)sg_memalign(xfer_len, 0, &free_cprb,
+                                          verbose > 3);
+    if (NULL == cpResultBuff) {
             pr2serr(ME "out of memory\n");
-            return SG_LIB_FILE_ERROR;
+            return sg_convert_errno(ENOMEM);
     }
-    memset(cpResultBuff, 0x00, xfer_len);
 
     sg_fd = sg_cmds_open_device(device_name, o_readonly, verbose);
     if (sg_fd < 0) {
-        pr2serr(ME "open error: %s: %s\n", device_name,
-                safe_strerror(-sg_fd));
-        ret = SG_LIB_FILE_ERROR;
+        if (verbose)
+            pr2serr(ME "open error: %s: %s\n", device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
         goto finish;
     }
 
-    if ((sa < 0) || (sa >= (int)(sizeof(rec_copy_name_arr) / sizeof(char *))))
+    if ((sa < 0) || (sa >= (int)SG_ARRAY_SIZE(rec_copy_name_arr)))
         cp = "Out of range service action";
     else
         cp = rec_copy_name_arr[sa];
@@ -434,7 +461,7 @@ main(int argc, char * argv[])
         goto finish;
     }
     if (do_hex) {
-        dStrHex((const char *)cpResultBuff, xfer_len, 1);
+        hex2stdout(cpResultBuff, xfer_len, 1);
         goto finish;
     }
     switch (sa) {
@@ -448,17 +475,25 @@ main(int argc, char * argv[])
         scsi_copy_status(cpResultBuff, xfer_len);
         break;
     default:
-        dStrHex((const char *)cpResultBuff, xfer_len, 1);
+        hex2stdout(cpResultBuff, xfer_len, 1);
         break;
     }
 
 finish:
-    free(cpResultBuff);
-    res = sg_cmds_close_device(sg_fd);
-    if (res < 0) {
-        pr2serr(ME "close error: %s\n", safe_strerror(-res));
-        if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+    if (free_cprb)
+        free(free_cprb);
+    if (sg_fd >= 0) {
+        res = sg_cmds_close_device(sg_fd);
+        if (res < 0) {
+            pr2serr(ME "close error: %s\n", safe_strerror(-res));
+            if (0 == ret)
+                ret = sg_convert_errno(-res);
+        }
+    }
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_copy_results failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' or '-vv' for "
+                    "more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

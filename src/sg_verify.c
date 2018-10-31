@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2017 Douglas Gilbert.
+ * Copyright (c) 2004-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <errno.h>
 #include <string.h>
 #include <getopt.h>
 #define __STDC_FORMAT_MACROS 1
@@ -36,7 +37,7 @@
  * the possibility of protection data (DIF).
  */
 
-static const char * version_str = "1.23 20171012";    /* sbc4r01 */
+static const char * version_str = "1.25 20180628";    /* sbc4r15 */
 
 #define ME "sg_verify: "
 
@@ -130,8 +131,11 @@ main(int argc, char * argv[])
     bool got_stdin = false;
     bool quiet = false;
     bool readonly = false;
+    bool verbose_given = false;
     bool verify16 = false;
-    int sg_fd, res, c, num, nread, infd;
+    bool version_given = false;
+    int res, c, num, nread, infd;
+    int sg_fd = -1;
     int bpc = 128;
     int group = 0;
     int bytchk = 0;
@@ -146,7 +150,8 @@ main(int argc, char * argv[])
     uint64_t info64 = 0;
     uint64_t lba = 0;
     uint64_t orig_lba;
-    char *ref_data = NULL;
+    uint8_t * ref_data = NULL;
+    uint8_t * free_ref_data = NULL;
     const char * device_name = NULL;
     const char * file_name = NULL;
     const char * vc;
@@ -238,11 +243,12 @@ main(int argc, char * argv[])
             verify16 = false;
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr(ME "version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
             usage();
@@ -261,6 +267,27 @@ main(int argc, char * argv[])
             return SG_LIB_SYNTAX_ERROR;
         }
     }
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr(ME "version: %s\n", version_str);
+        return 0;
+    }
+
     if (ndo > 0) {
         if (0 == bytchk)
             bytchk = 1;
@@ -279,7 +306,7 @@ main(int argc, char * argv[])
     } else if (bytchk > 0) {
         pr2serr("when the 'ebytchk=BCH' option is given, then '--bytchk=NDO' "
                 "must also be given\n");
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CONTRADICT;
     }
 
     if ((bpc > 0xffff) && (! verify16)) {
@@ -299,10 +326,11 @@ main(int argc, char * argv[])
     orig_lba = lba;
 
     if (ndo > 0) {
-        ref_data = (char *)malloc(ndo);
+        ref_data = (uint8_t *)sg_memalign(ndo, 0, &free_ref_data, verbose > 4);
         if (NULL == ref_data) {
             pr2serr("failed to allocate %d byte buffer\n", ndo);
-            return SG_LIB_FILE_ERROR;
+            ret = sg_convert_errno(ENOMEM);
+            goto err_out;
         }
         if ((NULL == file_name) || (0 == strcmp(file_name, "-"))) {
             got_stdin = true;
@@ -311,10 +339,10 @@ main(int argc, char * argv[])
                 perror("sg_set_binary_mode");
         } else {
             if ((infd = open(file_name, O_RDONLY)) < 0) {
+                ret = sg_convert_errno(errno);
                 snprintf(ebuff, EBUFF_SZ,
                          ME "could not open %s for reading", file_name);
                 perror(ebuff);
-                ret = SG_LIB_FILE_ERROR;
                 goto err_out;
             } else if (sg_set_binary_mode(infd) < 0)
                 perror("sg_set_binary_mode");
@@ -324,9 +352,9 @@ main(int argc, char * argv[])
         for (nread = 0; nread < ndo; nread += res) {
             res = read(infd, ref_data + nread, ndo - nread);
             if (res <= 0) {
+                ret = sg_convert_errno(errno);
                 pr2serr("reading from %s failed at file offset=%d\n",
                         (got_stdin ? "stdin" : file_name), nread);
-                ret = SG_LIB_FILE_ERROR;
                 goto err_out;
             }
         }
@@ -342,8 +370,10 @@ main(int argc, char * argv[])
     }
     sg_fd = sg_cmds_open_device(device_name, readonly, verbose);
     if (sg_fd < 0) {
-        pr2serr(ME "open error: %s: %s\n", device_name, safe_strerror(-sg_fd));
-        ret = SG_LIB_FILE_ERROR;
+        if (verbose)
+            pr2serr(ME "open error: %s: %s\n", device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
         goto err_out;
     }
 
@@ -399,15 +429,21 @@ main(int argc, char * argv[])
                 " [0x%" PRIx64 "]\n    without error\n", orig_count,
                 (uint64_t)orig_count, orig_lba, orig_lba);
 
-    res = sg_cmds_close_device(sg_fd);
-    if (res < 0) {
-        pr2serr("close error: %s\n", safe_strerror(-res));
-        if (0 == ret)
-            ret = SG_LIB_FILE_ERROR;
-    }
-
  err_out:
-    if (ref_data)
-        free(ref_data);
+    if (sg_fd >= 0) {
+        res = sg_cmds_close_device(sg_fd);
+        if (res < 0) {
+            pr2serr("close error: %s\n", safe_strerror(-res));
+            if (0 == ret)
+                ret = sg_convert_errno(-res);
+        }
+    }
+    if (free_ref_data)
+        free(free_ref_data);
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_verify failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
+    }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

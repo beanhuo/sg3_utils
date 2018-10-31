@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006-2016 Douglas Gilbert.
+ * Copyright (c) 2006-2018 Douglas Gilbert.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -31,12 +31,15 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+
 #include "sg_lib.h"
+#include "sg_pr2serr.h"
 #include "sg_io_linux.h"
 
 /* This program performs a ATA PASS-THROUGH (16) SCSI command in order
@@ -56,7 +59,7 @@
 
 #define EBUFF_SZ 256
 
-static const char * version_str = "1.05 20160528";
+static const char * version_str = "1.07 20180706";
 
 
 #if 0
@@ -64,7 +67,7 @@ static const char * version_str = "1.05 20160528";
  * command, else returns 0. If returns 0 (expected sense data not found)
  * then '\0' placed in first byte of bp. */
 static int
-sg_sat_decode_fixed_sense(const unsigned char * sp, int slen, char * bp,
+sg_sat_decode_fixed_sense(const uint8_t * sp, int slen, char * bp,
                           int max_blen, int verbose)
 {
     int n;
@@ -76,19 +79,19 @@ sg_sat_decode_fixed_sense(const unsigned char * sp, int slen, char * bp,
         (SPC_SK_RECOVERED_ERROR != (0xf & sp[2])) ||
         (0 != sp[12]) || (ASCQ_ATA_PT_INFO_AVAILABLE != sp[13]))
         return 0;
-    n = snprintf(bp, max_blen, "error=0x%x, status=0x%x, device=0x%x, "
+    n = sg_scnpr(bp, max_blen, "error=0x%x, status=0x%x, device=0x%x, "
                  "sector_count(7:0)=0x%x%c\n", sp[3], sp[4], sp[5], sp[6],
                  ((0x40 & sp[8]) ? '+' : ' '));
     if (n >= max_blen)
         return max_blen - 1;
-    n += snprintf(bp + n, max_blen - n, "extend=%d, log_index=0x%x, "
+    n += sg_scnpr(bp + n, max_blen - n, "extend=%d, log_index=0x%x, "
                   "lba_high,mid,low(7:0)=0x%x,0x%x,0x%x%c\n",
                   (!!(0x80 & sp[8])), (0xf & sp[8]), sp[9], sp[10], sp[11],
                   ((0x20 & sp[8]) ? '+' : ' '));
     if (n >= max_blen)
         return max_blen - 1;
     if (verbose)
-        n += snprintf(bp + n, max_blen - n, "  sector_count_upper_nonzero="
+        n += sg_scnpr(bp + n, max_blen - n, "  sector_count_upper_nonzero="
                       "%d, lba_upper_nonzero=%d\n", !!(0x40 & sp[8]),
                       !!(0x20 & sp[8]));
     return (n >= max_blen) ? max_blen - 1 : n;
@@ -98,13 +101,13 @@ sg_sat_decode_fixed_sense(const unsigned char * sp, int slen, char * bp,
 int main(int argc, char * argv[])
 {
     int sg_fd, k;
-    unsigned char apt_cdb[SAT_ATA_PASS_THROUGH16_LEN] =
+    uint8_t apt_cdb[SAT_ATA_PASS_THROUGH16_LEN] =
                 {SAT_ATA_PASS_THROUGH16, 0, 0, 0, 0, 0, 0, 0,
                  0, 0, 0, 0, 0, 0, 0, 0};
     sg_io_hdr_t io_hdr;
     char * file_name = 0;
     char ebuff[EBUFF_SZ];
-    unsigned char sense_buffer[64];
+    uint8_t sense_buffer[64];
     int verbose = 0;
     int extend = 0;
     int chk_cond = 1;   /* set to 1 to read register(s) back */
@@ -112,7 +115,7 @@ int main(int argc, char * argv[])
     int t_dir = 1;      /* 0 -> to device, 1 -> from device */
     int byte_block = 1; /* 0 -> bytes, 1 -> 512 byte blocks */
     int t_length = 0;   /* 0 -> no data transferred, 2 -> sector count */
-    const unsigned char * bp = NULL;
+    const uint8_t * bp = NULL;
 
     for (k = 1; k < argc; ++k) {
         if (0 == strcmp(argv[k], "-v"))

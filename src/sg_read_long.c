@@ -1,16 +1,16 @@
 /* A utility program for the Linux OS SCSI subsystem.
-   *  Copyright (C) 2004-2017 D. Gilbert
-   *  This program is free software; you can redistribute it and/or modify
-   *  it under the terms of the GNU General Public License as published by
-   *  the Free Software Foundation; either version 2, or (at your option)
-   *  any later version.
-
-   This program issues the SCSI command READ LONG to a given SCSI device.
-   It sends the command with the logical block address passed as the lba
-   argument, and the transfer length set to the xfer_len argument. the
-   buffer to be writen to the device filled with 0xff, this buffer includes
-   the sector data and the ECC bytes.
-*/
+ *  Copyright (C) 2004-2018 D. Gilbert
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2, or (at your option)
+ *  any later version.
+ *
+ * This program issues the SCSI command READ LONG to a given SCSI device.
+ * It sends the command with the logical block address passed as the lba
+ * argument, and the transfer length set to the xfer_len argument. the
+ * buffer to be written to the device filled with 0xff, this buffer includes
+ * the sector data and the ECC bytes.
+ */
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -19,6 +19,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <string.h>
+#include <errno.h>
 #include <getopt.h>
 #include <errno.h>
 #define __STDC_FORMAT_MACROS 1
@@ -27,18 +28,19 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_cmds_basic.h"
 #include "sg_cmds_extra.h"
 #include "sg_pr2serr.h"
 
-static const char * version_str = "1.23 20171006";
+static const char * version_str = "1.27 20180627";
 
 #define MAX_XFER_LEN 10000
 
 #define ME "sg_read_long: "
 
-#define EBUFF_SZ 256
+#define EBUFF_SZ 512
 
 
 static struct option long_options[] = {
@@ -52,6 +54,7 @@ static struct option long_options[] = {
         {"verbose", no_argument, 0, 'v'},
         {"version", no_argument, 0, 'V'},
         {"xfer_len", required_argument, 0, 'x'},
+        {"xfer-len", required_argument, 0, 'x'},
         {0, 0, 0, 0},
 };
 
@@ -125,14 +128,18 @@ main(int argc, char * argv[])
     bool pblock = false;
     bool readonly = false;
     bool got_stdout;
-    int sg_fd, outfd, res, c;
+    bool verbose_given = false;
+    bool version_given = false;
+    int outfd, res, c;
+    int sg_fd = -1;
     int ret = 0;
     int xfer_len = 520;
     int verbose = 0;
     uint64_t llba = 0;
     int64_t ll;
-    unsigned char * readLongBuff = NULL;
-    void * rawp = NULL;
+    uint8_t * readLongBuff = NULL;
+    uint8_t * rawp = NULL;
+    uint8_t * free_rawp = NULL;
     const char * device_name = NULL;
     char out_fname[256];
     char ebuff[EBUFF_SZ];
@@ -175,11 +182,12 @@ main(int argc, char * argv[])
             do_16 = true;
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr(ME "version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         case 'x':
             xfer_len = sg_get_num(optarg);
            if (-1 == xfer_len) {
@@ -206,8 +214,29 @@ main(int argc, char * argv[])
         }
     }
 
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr(ME "version: %s\n", version_str);
+        return 0;
+    }
+
     if (NULL == device_name) {
-        pr2serr("missing device name!\n");
+        pr2serr("Missing device name!\n\n");
         usage();
         return SG_LIB_SYNTAX_ERROR;
     }
@@ -219,16 +248,21 @@ main(int argc, char * argv[])
     }
     sg_fd = sg_cmds_open_device(device_name, readonly, verbose);
     if (sg_fd < 0) {
-        pr2serr(ME "open error: %s: %s\n", device_name, safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        if (verbose)
+            pr2serr(ME "open error: %s: %s\n", device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
+        goto err_out;
     }
 
-    if (NULL == (rawp = malloc(MAX_XFER_LEN))) {
-        pr2serr(ME "out of memory\n");
-        sg_cmds_close_device(sg_fd);
-        return SG_LIB_SYNTAX_ERROR;
+    if (NULL == (rawp = (uint8_t *)sg_memalign(MAX_XFER_LEN, 0, &free_rawp,
+                                               false))) {
+        if (verbose)
+            pr2serr(ME "out of memory\n");
+        ret = sg_convert_errno(ENOMEM);
+        goto err_out;
     }
-    readLongBuff = (unsigned char *)rawp;
+    readLongBuff = (uint8_t *)rawp;
     memset(rawp, 0x0, MAX_XFER_LEN);
 
     pr2serr(ME "issue read long (%s) to device %s\n    xfer_len=%d (0x%x), "
@@ -241,7 +275,7 @@ main(int argc, char * argv[])
         goto err_out;
 
     if ('\0' == out_fname[0])
-        dStrHex((const char *)rawp, xfer_len, 0);
+        hex2stdout((const uint8_t *)rawp, xfer_len, 0);
     else {
         got_stdout = (0 == strcmp(out_fname, "-"));
         if (got_stdout)
@@ -270,12 +304,20 @@ main(int argc, char * argv[])
     }
 
 err_out:
-    if (rawp) free(rawp);
-    res = sg_cmds_close_device(sg_fd);
-    if (res < 0) {
-        pr2serr("close error: %s\n", safe_strerror(-res));
-        if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+    if (free_rawp)
+        free(free_rawp);
+    if (sg_fd >= 0) {
+        res = sg_cmds_close_device(sg_fd);
+        if (res < 0) {
+            pr2serr("close error: %s\n", safe_strerror(-res));
+            if (0 == ret)
+                ret = sg_convert_errno(-res);
+        }
+    }
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_read_long failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

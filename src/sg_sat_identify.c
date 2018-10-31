@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006-2017 Douglas Gilbert.
+ * Copyright (c) 2006-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -19,6 +19,7 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_cmds_basic.h"
 #include "sg_cmds_extra.h"
@@ -38,7 +39,7 @@
 #define SAT_ATA_PASS_THROUGH32_LEN 32
 #define SAT_ATA_PASS_THROUGH16 0x85
 #define SAT_ATA_PASS_THROUGH16_LEN 16
-#define SAT_ATA_PASS_THROUGH12 0xa1     /* clashes with MMC BLANK comand */
+#define SAT_ATA_PASS_THROUGH12 0xa1     /* clashes with MMC BLANK command */
 #define SAT_ATA_PASS_THROUGH12_LEN 12
 #define SAT_ATA_RETURN_DESC 9  /* ATA Return (sense) Descriptor */
 #define ASCQ_ATA_PT_INFO_AVAILABLE 0x1d
@@ -51,9 +52,10 @@
 
 #define EBUFF_SZ 256
 
-static const char * version_str = "1.15 20171006";
+static const char * version_str = "1.17 20180515";
 
 static struct option long_options[] = {
+        {"ck-cond", no_argument, 0, 'c'},
         {"ck_cond", no_argument, 0, 'c'},
         {"extend", no_argument, 0, 'e'},
         {"help", no_argument, 0, 'h'},
@@ -68,7 +70,9 @@ static struct option long_options[] = {
         {0, 0, 0, 0},
 };
 
-static void usage()
+
+static void
+usage()
 {
     pr2serr("Usage: sg_sat_identify [--ck_cond] [--extend] [--help] [--hex] "
             "[--ident]\n"
@@ -99,17 +103,19 @@ static void usage()
             "support the SCSI ATA\nPASS-THROUGH(32) command.\n");
 }
 
-static void dStrRaw(const char* str, int len)
+static void
+dStrRaw(const uint8_t * str, int len)
 {
     int k;
 
-    for (k = 0 ; k < len; ++k)
+    for (k = 0; k < len; ++k)
         printf("%c", str[k]);
 }
 
-static int do_identify_dev(int sg_fd, bool do_packet, int cdb_len,
-                           bool ck_cond, bool extend, bool do_ident,
-                           int do_hex, bool do_raw, int verbose)
+static int
+do_identify_dev(int sg_fd, bool do_packet, int cdb_len, bool ck_cond,
+                bool extend, bool do_ident, int do_hex, bool do_raw,
+                int verbose)
 {
     bool t_type = false;/* false -> 512 byte blocks,
                            true -> device's LB size */
@@ -127,16 +133,16 @@ static int do_identify_dev(int sg_fd, bool do_packet, int cdb_len,
     int resid = 0;
     uint64_t ull;
     struct sg_scsi_sense_hdr ssh;
-    unsigned char inBuff[ID_RESPONSE_LEN];
-    unsigned char sense_buffer[64];
-    unsigned char ata_return_desc[16];
-    unsigned char apt_cdb[SAT_ATA_PASS_THROUGH16_LEN] =
+    uint8_t inBuff[ID_RESPONSE_LEN];
+    uint8_t sense_buffer[64];
+    uint8_t ata_return_desc[16];
+    uint8_t apt_cdb[SAT_ATA_PASS_THROUGH16_LEN] =
                 {SAT_ATA_PASS_THROUGH16, 0, 0, 0, 0, 0, 0, 0,
                  0, 0, 0, 0, 0, 0, 0, 0};
-    unsigned char apt12_cdb[SAT_ATA_PASS_THROUGH12_LEN] =
+    uint8_t apt12_cdb[SAT_ATA_PASS_THROUGH12_LEN] =
                 {SAT_ATA_PASS_THROUGH12, 0, 0, 0, 0, 0, 0, 0,
                  0, 0, 0, 0};
-    unsigned char apt32_cdb[SAT_ATA_PASS_THROUGH32_LEN];
+    uint8_t apt32_cdb[SAT_ATA_PASS_THROUGH32_LEN];
     const unsigned short * usp;
 
     sb_sz = sizeof(sense_buffer);
@@ -352,7 +358,7 @@ static int do_identify_dev(int sg_fd, bool do_packet, int cdb_len,
 
     if (ok) { /* output result if it is available */
         if (do_raw)
-            dStrRaw((const char *)inBuff, 512);
+            dStrRaw(inBuff, 512);
         else if (0 == do_hex) {
             if (do_ident) {
                 usp = (const unsigned short *)inBuff;
@@ -370,7 +376,7 @@ static int do_identify_dev(int sg_fd, bool do_packet, int cdb_len,
                          sg_is_big_endian());
             }
         } else if (1 == do_hex)
-            dStrHex((const char *)inBuff, 512, 0);
+            hex2stdout(inBuff, 512, 0);
         else if (2 == do_hex)
             dWordHex((const unsigned short *)inBuff, 256, 0,
                      sg_is_big_endian());
@@ -378,12 +384,13 @@ static int do_identify_dev(int sg_fd, bool do_packet, int cdb_len,
             dWordHex((const unsigned short *)inBuff, 256, -2,
                      sg_is_big_endian());
         else     /* '-HHHH' hex bytes only */
-            dStrHex((const char *)inBuff, 512, -1);
+            hex2stdout(inBuff, 512, -1);
     }
     return 0;
 }
 
-int main(int argc, char * argv[])
+int
+main(int argc, char * argv[])
 {
     bool do_packet = false;
     bool do_ident = false;
@@ -391,7 +398,10 @@ int main(int argc, char * argv[])
     bool o_readonly = false;
     bool ck_cond = false;    /* set to true to read register(s) back */
     bool extend = false;    /* set to true to send 48 bit LBA with command */
-    int sg_fd, c, res;
+    bool verbose_given = false;
+    bool version_given = false;
+    int c, res;
+    int sg_fd = -1;
     int cdb_len = SAT_ATA_PASS_THROUGH16_LEN;
     int do_hex = 0;
     int verbose = 0;
@@ -445,11 +455,12 @@ int main(int argc, char * argv[])
             o_readonly = true;
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr("version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
             usage();
@@ -468,9 +479,29 @@ int main(int argc, char * argv[])
             return SG_LIB_SYNTAX_ERROR;
         }
     }
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr("version: %s\n", version_str);
+        return 0;
+    }
 
     if (NULL == device_name) {
-        pr2serr("missing device name!\n");
+        pr2serr("Missing device name!\n\n");
         usage();
         return 1;
     }
@@ -482,19 +513,29 @@ int main(int argc, char * argv[])
     }
 
     if ((sg_fd = sg_cmds_open_device(device_name, o_readonly, verbose)) < 0) {
-        pr2serr("error opening file: %s: %s\n", device_name,
-                safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        if (verbose)
+            pr2serr("error opening file: %s: %s\n", device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
+        goto fini;
     }
 
     ret = do_identify_dev(sg_fd, do_packet, cdb_len, ck_cond, extend,
                           do_ident, do_hex, do_raw, verbose);
 
-    res = sg_cmds_close_device(sg_fd);
-    if (res < 0) {
-        pr2serr("close error: %s\n", safe_strerror(-res));
-        if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+fini:
+    if (sg_fd >= 0) {
+        res = sg_cmds_close_device(sg_fd);
+        if (res < 0) {
+            pr2serr("close error: %s\n", safe_strerror(-res));
+            if (0 == ret)
+                ret = sg_convert_errno(-res);
+        }
+    }
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_sat_identify failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

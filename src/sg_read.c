@@ -1,5 +1,5 @@
 /* A utility program for the Linux OS SCSI generic ("sg") device driver.
-*  Copyright (C) 2001 - 2017 D. Gilbert
+*  Copyright (C) 2001 - 2018 D. Gilbert
 *  This program is free software; you can redistribute it and/or modify
 *  it under the terms of the GNU General Public License as published by
 *  the Free Software Foundation; either version 2, or (at your option)
@@ -46,13 +46,14 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_io_linux.h"
 #include "sg_unaligned.h"
 #include "sg_pr2serr.h"
 
 
-static const char * version_str = "1.28 20171023";
+static const char * version_str = "1.33 20180724";
 
 #define DEF_BLOCK_SIZE 512
 #define DEF_BLOCKS_PER_TRANSFER 128
@@ -92,7 +93,9 @@ static int verbose = 0;
 
 static const char * proc_allow_dio = "/proc/scsi/sg/allow_dio";
 
-static void install_handler (int sig_num, void (*sig_handler) (int sig))
+
+static void
+install_handler (int sig_num, void (*sig_handler) (int sig))
 {
     struct sigaction sigact;
 
@@ -105,7 +108,8 @@ static void install_handler (int sig_num, void (*sig_handler) (int sig))
     }
 }
 
-static void print_stats(int iters, const char * str)
+static void
+print_stats(int iters, const char * str)
 {
     if (orig_count > 0) {
         if (0 != dd_count)
@@ -120,7 +124,8 @@ static void print_stats(int iters, const char * str)
         pr2serr("%s commands issued: %d\n", (str ? str : ""), iters);
 }
 
-static void interrupt_handler(int sig)
+static void
+interrupt_handler(int sig)
 {
     struct sigaction sigact;
 
@@ -133,14 +138,16 @@ static void interrupt_handler(int sig)
     kill (getpid (), sig);
 }
 
-static void siginfo_handler(int sig)
+static void
+siginfo_handler(int sig)
 {
     if (sig) { ; }      /* unused, dummy to suppress warning */
     pr2serr("Progress report, continuing ...\n");
     print_stats(0, NULL);
 }
 
-static int dd_filetype(const char * filename)
+static int
+dd_filetype(const char * filename)
 {
     struct stat st;
 
@@ -156,7 +163,8 @@ static int dd_filetype(const char * filename)
     return FT_OTHER;
 }
 
-static void usage()
+static void
+usage()
 {
     pr2serr("Usage: sg_read  [blk_sgio=0|1] [bpt=BPT] [bs=BS] "
             "[cdbsz=6|10|12|16]\n"
@@ -165,7 +173,8 @@ static void usage()
             "                [mmap=0|1] [no_dfxer=0|1] [odir=0|1] "
             "[skip=SKIP]\n"
             "                [time=TI] [verbose=VERB] [--help] "
-            "[--version]\n"
+            "[--verbose]\n"
+            "                [--version] "
             "  where:\n"
             "    blk_sgio 0->normal IO for block devices, 1->SCSI commands "
             "via SG_IO\n"
@@ -196,15 +205,16 @@ static void usage()
             "    time     0->do nothing(def), 1->time from 1st cmd, 2->time "
             "from 2nd, ...\n"
             "    verbose  increase level of verbosity (def: 0)\n"
-            "    --help   print this usage message then exit\n"
-            "    --version  print version number then exit\n\n"
+            "    --help|-h    print this usage message then exit\n"
+            "    --verbose|-v   increase level of verbosity (def: 0)\n"
+            "    --version|-V   print version number then exit\n\n"
             "Issue SCSI READ commands, each starting from the same logical "
             "block address\n");
 }
 
-static int sg_build_scsi_cdb(unsigned char * cdbp, int cdb_sz,
-                             unsigned int blocks, int64_t start_block,
-                             bool write_true, bool fua, bool dpo)
+static int
+sg_build_scsi_cdb(uint8_t * cdbp, int cdb_sz, unsigned int blocks,
+                  int64_t start_block, bool write_true, bool fua, bool dpo)
 {
     int sz_ind;
     int rd_opcode[] = {0x8, 0x28, 0xa8, 0x88};
@@ -218,10 +228,10 @@ static int sg_build_scsi_cdb(unsigned char * cdbp, int cdb_sz,
     switch (cdb_sz) {
     case 6:
         sz_ind = 0;
-        cdbp[0] = (unsigned char)(write_true ? wr_opcode[sz_ind] :
+        cdbp[0] = (uint8_t)(write_true ? wr_opcode[sz_ind] :
                                                rd_opcode[sz_ind]);
         sg_put_unaligned_be24(0x1fffff & start_block, cdbp + 1);
-        cdbp[4] = (256 == blocks) ? 0 : (unsigned char)blocks;
+        cdbp[4] = (256 == blocks) ? 0 : (uint8_t)blocks;
         if (blocks > 256) {
             pr2serr(ME "for 6 byte commands, maximum number of blocks is "
                     "256\n");
@@ -240,7 +250,7 @@ static int sg_build_scsi_cdb(unsigned char * cdbp, int cdb_sz,
         break;
     case 10:
         sz_ind = 1;
-        cdbp[0] = (unsigned char)(write_true ? wr_opcode[sz_ind] :
+        cdbp[0] = (uint8_t)(write_true ? wr_opcode[sz_ind] :
                                                rd_opcode[sz_ind]);
         sg_put_unaligned_be32((uint32_t)start_block, cdbp + 2);
         sg_put_unaligned_be16((uint16_t)blocks, cdbp + 7);
@@ -252,14 +262,14 @@ static int sg_build_scsi_cdb(unsigned char * cdbp, int cdb_sz,
         break;
     case 12:
         sz_ind = 2;
-        cdbp[0] = (unsigned char)(write_true ? wr_opcode[sz_ind] :
+        cdbp[0] = (uint8_t)(write_true ? wr_opcode[sz_ind] :
                                                rd_opcode[sz_ind]);
         sg_put_unaligned_be32((uint32_t)start_block, cdbp + 2);
         sg_put_unaligned_be32((uint32_t)blocks, cdbp + 6);
         break;
     case 16:
         sz_ind = 3;
-        cdbp[0] = (unsigned char)(write_true ? wr_opcode[sz_ind] :
+        cdbp[0] = (uint8_t)(write_true ? wr_opcode[sz_ind] :
                                                rd_opcode[sz_ind]);
         sg_put_unaligned_be64(start_block, cdbp + 2);
         sg_put_unaligned_be32((uint32_t)blocks, cdbp + 10);
@@ -275,14 +285,14 @@ static int sg_build_scsi_cdb(unsigned char * cdbp, int cdb_sz,
 /* -3 medium/hardware error, -2 -> not ready, 0 -> successful,
    1 -> recoverable (ENOMEM), 2 -> try again (e.g. unit attention),
    3 -> try again (e.g. aborted command), -1 -> other unrecoverable error */
-static int sg_bread(int sg_fd, unsigned char * buff, int blocks,
-                    int64_t from_block, int bs, int cdbsz,
-                    bool fua, bool dpo, bool * diop, bool do_mmap,
-                    bool no_dxfer)
+static int
+sg_bread(int sg_fd, uint8_t * buff, int blocks, int64_t from_block, int bs,
+         int cdbsz, bool fua, bool dpo, bool * diop, bool do_mmap,
+         bool no_dxfer)
 {
     int k;
-    unsigned char rdCmd[MAX_SCSI_CDBSZ];
-    unsigned char senseBuff[SENSE_BUFF_LEN];
+    uint8_t rdCmd[MAX_SCSI_CDBSZ];
+    uint8_t senseBuff[SENSE_BUFF_LEN];
     struct sg_io_hdr io_hdr;
 
     if (sg_build_scsi_cdb(rdCmd, cdbsz, blocks, from_block, false, fua,
@@ -365,12 +375,27 @@ static int sg_bread(int sg_fd, unsigned char * buff, int blocks,
     return 0;
 }
 
+/* Returns the number of times 'ch' is found in string 's' given the
+ * string's length. */
+static int
+num_chs_in_str(const char * s, int slen, int ch)
+{
+    int res = 0;
+
+    while (--slen >= 0) {
+        if (ch == s[slen])
+            ++res;
+    }
+    return res;
+}
+
 #define STR_SZ 1024
 #define INF_SZ 512
-#define EBUFF_SZ 512
+#define EBUFF_SZ 768
 
 
-int main(int argc, char * argv[])
+int
+main(int argc, char * argv[])
 {
     bool count_given = false;
     bool dio_tmp;
@@ -381,6 +406,8 @@ int main(int argc, char * argv[])
     bool dpo = false;
     bool fua = false;
     bool no_dxfer = false;
+    bool verbose_given = false;
+    bool version_given = false;
     int bs = 0;
     int bpt = DEF_BLOCKS_PER_TRANSFER;
     int dio_incomplete = 0;
@@ -388,13 +415,14 @@ int main(int argc, char * argv[])
     int in_type = FT_OTHER;
     int ret = 0;
     int scsi_cdbsz = DEF_SCSI_CDBSZ;
-    int res, k, t, buf_sz, iters, infd, blocks, flags, blocks_per;
+    int res, k, t, buf_sz, iters, infd, blocks, flags, blocks_per, err;
+    int n, keylen;
     size_t psz;
     int64_t skip = 0;
     char * key;
     char * buf;
-    unsigned char * wrkBuff = NULL;
-    unsigned char * wrkPos = NULL;
+    uint8_t * wrkBuff = NULL;
+    uint8_t * wrkPos = NULL;
     char inf[INF_SZ];
     char outf[INF_SZ];
     char str[STR_SZ];
@@ -419,6 +447,7 @@ int main(int argc, char * argv[])
             buf++;
         if (*buf)
             *buf++ = '\0';
+        keylen = strlen(key);
         if (0 == strcmp(key,"blk_sgio"))
             do_blk_sgio = !! sg_get_num(buf);
         else if (0 == strcmp(key,"bpt")) {
@@ -458,7 +487,7 @@ int main(int argc, char * argv[])
         else if (0 == strcmp(key,"fua"))
             fua = !! sg_get_num(buf);
         else if (strcmp(key,"if") == 0)
-            strncpy(inf, buf, INF_SZ);
+            strncpy(inf, buf, INF_SZ - 1);
         else if (0 == strcmp(key,"mmap"))
             do_mmap = !! sg_get_num(buf);
         else if (0 == strcmp(key,"no_dxfer"))
@@ -466,7 +495,7 @@ int main(int argc, char * argv[])
         else if (0 == strcmp(key,"odir"))
             do_odir = !! sg_get_num(buf);
         else if (strcmp(key,"of") == 0)
-            strncpy(outf, buf, INF_SZ);
+            strncpy(outf, buf, INF_SZ - 1);
         else if (0 == strcmp(key,"skip")) {
             skip = sg_get_llnum(buf);
             if (-1 == skip) {
@@ -475,20 +504,66 @@ int main(int argc, char * argv[])
             }
         } else if (0 == strcmp(key,"time"))
             do_time = sg_get_num(buf);
-        else if (0 == strncmp(key, "verb", 4))
+        else if (0 == strncmp(key, "verb", 4)) {
+            verbose_given = true;
             verbose = sg_get_num(buf);
-        else if (0 == strncmp(key, "--help", 6)) {
+        } else if (0 == strncmp(key, "--help", 6)) {
             usage();
             return 0;
-        } else if (0 == strncmp(key, "--vers", 6)) {
-            pr2serr( ME ": %s\n", version_str);
-            return 0;
+        } else if (0 == strncmp(key, "--verb", 6)) {
+            verbose_given = true;
+            ++verbose;
+        } else if (0 == strncmp(key, "--vers", 6))
+            version_given = true;
+        else if ((keylen > 1) && ('-' == key[0]) && ('-' != key[1])) {
+            res = 0;
+            n = num_chs_in_str(key + 1, keylen - 1, 'h');
+            if (n > 0) {
+                usage();
+                return 0;
+            }
+            n = num_chs_in_str(key + 1, keylen - 1, 'v');
+            if (n > 0)
+                verbose_given = true;
+            verbose += n;
+            res += n;
+            n = num_chs_in_str(key + 1, keylen - 1, 'V');
+            if (n > 0)
+                version_given = true;
+            res += n;
+            if (res < (keylen - 1)) {
+                pr2serr("Unrecognised short option in '%s', try '--help'\n",
+                        key);
+                return SG_LIB_SYNTAX_ERROR;
+            }
         } else {
             pr2serr( "Unrecognized argument '%s'\n", key);
             usage();
             return SG_LIB_SYNTAX_ERROR;
         }
     }
+
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr( ME ": %s\n", version_str);
+        return 0;
+    }
+
     if (bs <= 0) {
         bs = DEF_BLOCK_SIZE;
         if ((dd_count > 0) && (bpt > 0))
@@ -514,11 +589,11 @@ int main(int argc, char * argv[])
     }
     if (do_dio && do_mmap) {
         pr2serr("cannot select both dio and mmap\n");
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CONTRADICT;
     }
     if (no_dxfer && (do_dio || do_mmap)) {
         pr2serr("cannot select no_dxfer with dio or mmap\n");
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CONTRADICT;
     }
 
     install_handler (SIGINT, interrupt_handler);
@@ -556,10 +631,11 @@ int main(int argc, char * argv[])
             if (do_odir)
                 flags |= O_DIRECT;
             if ((infd = open(inf, flags)) < 0) {
+                err = errno;
                 snprintf(ebuff, EBUFF_SZ,
                          ME "could not open %s for sg reading", inf);
                 perror(ebuff);
-                return SG_LIB_FILE_ERROR;
+                return sg_convert_errno(err);
             }
         }
         if (verbose)
@@ -598,10 +674,11 @@ int main(int argc, char * argv[])
         if (do_odir)
             flags |= O_DIRECT;
         if ((infd = open(inf, flags)) < 0) {
+            err = errno;
             snprintf(ebuff,  EBUFF_SZ,
                      ME "could not open %s for reading", inf);
             perror(ebuff);
-            return SG_LIB_FILE_ERROR;
+            return sg_convert_errno(err);
         }
         if (verbose)
             pr2serr("Opened %s for Unix reads with flags=0x%x\n", inf, flags);
@@ -610,10 +687,11 @@ int main(int argc, char * argv[])
 
             offset *= bs;       /* could exceed 32 bits here! */
             if (lseek64(infd, offset, SEEK_SET) < 0) {
+                err = errno;
                 snprintf(ebuff,  EBUFF_SZ,
                     ME "couldn't skip to required position on %s", inf);
                 perror(ebuff);
-                return SG_LIB_FILE_ERROR;
+                return sg_convert_errno(err);
             }
         }
     }
@@ -624,23 +702,23 @@ int main(int argc, char * argv[])
 
     if (dd_count > 0) {
         if (do_dio || do_odir || (FT_RAW & in_type)) {
-            wrkBuff = (unsigned char *)malloc(bs * bpt + psz);
+            wrkBuff = (uint8_t *)malloc(bs * bpt + psz);
             if (0 == wrkBuff) {
                 pr2serr("Not enough user memory for aligned storage\n");
                 return SG_LIB_CAT_OTHER;
             }
             /* perhaps use posix_memalign() instead */
-            wrkPos = (unsigned char *)(((uintptr_t)wrkBuff + psz - 1) &
+            wrkPos = (uint8_t *)(((sg_uintptr_t)wrkBuff + psz - 1) &
                                        (~(psz - 1)));
         } else if (do_mmap) {
-            wrkPos = (unsigned char *)mmap(NULL, bs * bpt,
+            wrkPos = (uint8_t *)mmap(NULL, bs * bpt,
                         PROT_READ | PROT_WRITE, MAP_SHARED, infd, 0);
             if (MAP_FAILED == wrkPos) {
                 perror(ME "error from mmap()");
                 return SG_LIB_CAT_OTHER;
             }
         } else {
-            wrkBuff = (unsigned char *)malloc(bs * bpt);
+            wrkBuff = (uint8_t *)malloc(bs * bpt);
             if (0 == wrkBuff) {
                 pr2serr("Not enough user memory\n");
                 return SG_LIB_CAT_OTHER;

@@ -1,4 +1,4 @@
-.TH SG_LOGS "8" "October 2017" "sg3_utils\-1.43" SG3_UTILS
+.TH SG_LOGS "8" "May 2018" "sg3_utils\-1.43" SG3_UTILS
 .SH NAME
 sg_logs \- access log pages with SCSI LOG SENSE command
 .SH SYNOPSIS
@@ -50,7 +50,7 @@ file (named \fIFN\fR) and decodes it as if it were a response from a LOG
 SENSE command. The third form shows the options that can be used to send a
 LOG SELECT command. The fourth form groups various management options.
 The last form shows the older, deprecated command line interface which is
-maintaimed for backward compatibility.
+maintained for backward compatibility.
 .SH OPTIONS
 Arguments to long options are mandatory for short options as well.
 The options are arranged in alphabetical order based on the long
@@ -297,7 +297,7 @@ are followed by "[hex only]".
 print out version string then exit.
 .SH LOG SELECT
 The LOG SELECT command can be used to reset certain parameters to vendor
-specific defaults, save them to non-volatile storage (i.e. the media), or
+specific defaults, save them to non\-volatile storage (i.e. the media), or
 supply new page contents. This command has changed between SPC\-3 and SPC\-4
 with the addition of the Page and Subpage Code fields which can only be
 non zero when the Parameter list length is zero.
@@ -472,7 +472,7 @@ Written by Douglas Gilbert
 .SH "REPORTING BUGS"
 Report bugs to <dgilbert at interlog dot com>.
 .SH COPYRIGHT
-Copyright \(co 2002\-2017 Douglas Gilbert
+Copyright \(co 2002\-2018 Douglas Gilbert
 .br
 This software is distributed under the GPL version 2. There is NO
 warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2017 Hannes Reinecke, SUSE Linux GmbH.
+ * Copyright (c) 2014-2018 Hannes Reinecke, SUSE Linux GmbH.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -18,6 +18,7 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_cmds_basic.h"
 #include "sg_cmds_extra.h"
@@ -41,7 +42,7 @@
 
 #define SAT_ATA_PASS_THROUGH16 0x85
 #define SAT_ATA_PASS_THROUGH16_LEN 16
-#define SAT_ATA_PASS_THROUGH12 0xa1     /* clashes with MMC BLANK comand */
+#define SAT_ATA_PASS_THROUGH12 0xa1     /* clashes with MMC BLANK command */
 #define SAT_ATA_PASS_THROUGH12_LEN 12
 #define SAT_ATA_RETURN_DESC 9  /* ATA Return (sense) Descriptor */
 #define ASCQ_ATA_PT_INFO_AVAILABLE 0x1d
@@ -51,7 +52,7 @@
 
 #define DEF_TIMEOUT 20
 
-static const char * version_str = "1.15 20171010";
+static const char * version_str = "1.20 20180628";
 
 struct opts_t {
     bool ck_cond;
@@ -68,6 +69,7 @@ struct opts_t {
 static struct option long_options[] = {
     {"count", required_argument, 0, 'c'},
     {"ck_cond", no_argument, 0, 'C'},
+    {"ck-cond", no_argument, 0, 'C'},
     {"dma", no_argument, 0, 'd'},
     {"help", no_argument, 0, 'h'},
     {"hex", no_argument, 0, 'H'},
@@ -120,7 +122,7 @@ usage()
 }
 
 static int
-do_read_gplog(int sg_fd, int ata_cmd, unsigned char *inbuff,
+do_read_gplog(int sg_fd, int ata_cmd, uint8_t *inbuff,
               const struct opts_t * op)
 {
     const bool extend = true;
@@ -135,12 +137,12 @@ do_read_gplog(int sg_fd, int ata_cmd, unsigned char *inbuff,
     int resid = 0;
     int sb_sz;
     struct sg_scsi_sense_hdr ssh;
-    unsigned char sense_buffer[64];
-    unsigned char ata_return_desc[16];
-    unsigned char apt_cdb[SAT_ATA_PASS_THROUGH16_LEN] =
+    uint8_t sense_buffer[64];
+    uint8_t ata_return_desc[16];
+    uint8_t apt_cdb[SAT_ATA_PASS_THROUGH16_LEN] =
                 {SAT_ATA_PASS_THROUGH16, 0, 0, 0, 0, 0, 0, 0,
                  0, 0, 0, 0, 0, 0, 0, 0};
-    unsigned char apt12_cdb[SAT_ATA_PASS_THROUGH12_LEN] =
+    uint8_t apt12_cdb[SAT_ATA_PASS_THROUGH12_LEN] =
                 {SAT_ATA_PASS_THROUGH12, 0, 0, 0, 0, 0, 0, 0,
                  0, 0, 0, 0};
     char cmd_name[32];
@@ -212,12 +214,12 @@ do_read_gplog(int sg_fd, int ata_cmd, unsigned char *inbuff,
             dWordHex((const unsigned short *)inbuff, op->count * 256, 0,
                      sg_is_big_endian());
         else if (1 == op->hex)
-            dStrHex((const char *)inbuff, 512, 0);
+            hex2stdout(inbuff, 512, 0);
         else if (3 == op->hex)  /* '-HHH' suitable for "hdparm --Istdin" */
             dWordHex((const unsigned short *)inbuff, 256, -2,
                      sg_is_big_endian());
         else    /* '-HHHH' hex bytes only */
-            dStrHex((const char *)inbuff, 512, -1);
+            hex2stdout(inbuff, 512, -1);
     } else if ((res > 0) && (res & SAM_STAT_CHECK_CONDITION)) {
         if (op->verbose > 1) {
             pr2serr("ATA pass through:\n");
@@ -327,9 +329,13 @@ do_read_gplog(int sg_fd, int ata_cmd, unsigned char *inbuff,
 int
 main(int argc, char * argv[])
 {
-    int sg_fd, c, ret, res, n;
+    bool verbose_given = false;
+    bool version_given = false;
+    int c, ret, res, n;
+    int sg_fd = -1;
     int ata_cmd = ATA_READ_LOG_EXT;
-    unsigned char *inbuff;
+    uint8_t *inbuff = NULL;
+    uint8_t *free_inbuff = NULL;
     struct opts_t opts;
     struct opts_t * op;
 
@@ -391,11 +397,12 @@ main(int argc, char * argv[])
             op->rdonly = true;
             break;
         case 'v':
+            verbose_given = true;
             ++op->verbose;
             break;
         case 'V':
-            pr2serr("version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
             usage();
@@ -416,8 +423,29 @@ main(int argc, char * argv[])
         }
     }
 
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        op->verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        op->verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", op->verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr("version: %s\n", version_str);
+        return 0;
+    }
+
     if (NULL == op->device_name) {
-        pr2serr("missing device name!\n");
+        pr2serr("Missing device name!\n\n");
         usage();
         return 1;
     }
@@ -430,7 +458,7 @@ main(int argc, char * argv[])
     }
 
     n = op->count * 512;
-    inbuff = (unsigned char *)malloc(n);
+    inbuff = (uint8_t *)sg_memalign(n, 0, &free_inbuff, op->verbose > 3);
     if (!inbuff) {
         pr2serr("Cannot allocate output buffer of size %d\n", n);
         return SG_LIB_CAT_OTHER;
@@ -438,21 +466,30 @@ main(int argc, char * argv[])
 
     if ((sg_fd = sg_cmds_open_device(op->device_name, op->rdonly,
                                      op->verbose)) < 0) {
-        pr2serr("error opening file: %s: %s\n", op->device_name,
-                safe_strerror(-sg_fd));
-        ret = SG_LIB_FILE_ERROR;
+        if (op->verbose)
+            pr2serr("error opening file: %s: %s\n", op->device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
         goto fini;
     }
 
     ret = do_read_gplog(sg_fd, ata_cmd, inbuff, op);
 
-    res = sg_cmds_close_device(sg_fd);
-    if (res < 0) {
-        pr2serr("close error: %s\n", safe_strerror(-res));
-        if (0 == ret)
-            ret = SG_LIB_FILE_ERROR;
-    }
 fini:
-    free(inbuff);
+    if (sg_fd >= 0) {
+        res = sg_cmds_close_device(sg_fd);
+        if (res < 0) {
+            pr2serr("close error: %s\n", safe_strerror(-res));
+            if (0 == ret)
+                ret = sg_convert_errno(-res);
+        }
+    }
+    if (0 == op->verbose) {
+        if (! sg_if_can2stderr("sg_sat_read_gplog failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
+    }
+    if (free_inbuff)
+        free(free_inbuff);
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

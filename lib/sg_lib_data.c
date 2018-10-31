@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2017 Douglas Gilbert.
+ * Copyright (c) 2007-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -7,17 +7,17 @@
 
 #include <stdlib.h>
 
-#include "sg_lib.h"
-#include "sg_lib_data.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #else
 #define SG_SCSI_STRINGS 1
 #endif
 
+#include "sg_lib.h"
+#include "sg_lib_data.h"
 
-const char * sg_lib_version_str = "2.30 20171003";/* spc5r17, sbc4r14 */
+
+const char * sg_lib_version_str = "2.53 20180712";/* spc5r19, sbc4r15 */
 
 
 /* indexed by pdt; those that map to own index do not decay */
@@ -125,11 +125,11 @@ struct sg_lib_value_name_t sg_lib_normal_opcodes[] = {
     {0x4d, 0, "Log sense"},
     {0x4e, 0, "Stop play/scan"},
     {0x50, 0, "Xdwrite(10)"},           /* obsolete in SBC-3 r31 */
-    {0x51, 0, "Xpwrite(10)"},
+    {0x51, 0, "Xpwrite(10)"},           /* obsolete in SBC-4 r15 */
     {0x51, PDT_MMC, "Read disk information"},
     {0x52, 0, "Xdread(10)"},            /* obsolete in SBC-3 r31 */
     {0x52, PDT_MMC, "Read track information"},
-    {0x53, 0, "Xdwriteread(10)"},
+    {0x53, 0, "Xdwriteread(10)"},       /* obsolete in SBC-4 r15 */
     {0x54, 0, "Send OPC information"},
     {0x55, 0, "Mode select(10)"},
     {0x56, 0, "Reserve(10)"},           /* obsolete in SPC-4 r11 */
@@ -144,7 +144,7 @@ struct sg_lib_value_name_t sg_lib_normal_opcodes[] = {
     {0x5e, 0, "Persistent reserve in"},
     {0x5f, 0, "Persistent reserve out"},
     {0x7e, 0, "Extended cdb (XCBD)"},           /* added in SPC-4 r12 */
-    {0x80, 0, "Xdwrite extended(16)"},
+    {0x80, 0, "Xdwrite extended(16)"},          /* obsolete in SBC-4 r15 */
     {0x80, PDT_TAPE, "Write filemarks(16)"},
     {0x81, 0, "Rebuild(16)"},
     {0x81, PDT_TAPE, "Read reverse(16)"},
@@ -403,12 +403,15 @@ struct sg_lib_value_name_t sg_lib_pr_out_arr[] = {
 
 /* Third party copy in [0x83] service actions
  * Opcode 'Receive copy results' was renamed 'Third party copy in' in spc4r34
- * LID1 is an abbreviation of List Identifier length of 1 byte */
-struct sg_lib_value_name_t sg_lib_xcopy_sa_arr[] = {
+ * LID1 is an abbreviation of List Identifier length of 1 byte. In SPC-5
+ * LID1 discontinued (references back to SPC-4) and "(LID4)" suffix removed
+ * as there is no need to differentiate. */
+struct sg_lib_value_name_t sg_lib_xcopy_sa_arr[] = {    /* originating */
     {0x0, 0, "Extended copy(LID1)"},
-    {0x1, 0, "Extended copy(LID4)"},
+    {0x1, 0, "Extended copy"},          /* was 'Extended copy(LID4)' */
     {0x10, 0, "Populate token"},
     {0x11, 0, "Write using token"},
+    {0x16, 1, "Set tape stream mirroring"},     /* ADC-4 and SSC-5 */
     {0x1c, 0, "Copy operation abort"},
     {0xffff, 0, NULL},
 };
@@ -416,15 +419,16 @@ struct sg_lib_value_name_t sg_lib_xcopy_sa_arr[] = {
 /* Third party copy out [0x84] service actions
  * Opcode 'Extended copy' was renamed 'Third party copy out' in spc4r34
  * LID4 is an abbreviation of List Identifier length of 4 bytes */
-struct sg_lib_value_name_t sg_lib_rec_copy_sa_arr[] = {
+struct sg_lib_value_name_t sg_lib_rec_copy_sa_arr[] = { /* retrieve */
     {0x0, 0, "Receive copy status(LID1)"},
     {0x1, 0, "Receive copy data(LID1)"},
     {0x3, 0, "Receive copy operating parameters"},
     {0x4, 0, "Receive copy failure details(LID1)"},
-    {0x5, 0, "Receive copy status(LID4)"},
-    {0x6, 0, "Receive copy data(LID4)"},
+    {0x5, 0, "Receive copy status"},    /* was 'Receive copy status(LID4)' */
+    {0x6, 0, "Receive copy data"},      /* was 'Receive copy data(LID4)' */
     {0x7, 0, "Receive ROD token information"},
     {0x8, 0, "Report all ROD tokens"},
+    {0x16, 1, "Report tape stream mirroring"},  /* SSC-5 */
     {0xffff, 0, NULL},
 };
 
@@ -432,12 +436,12 @@ struct sg_lib_value_name_t sg_lib_rec_copy_sa_arr[] = {
 struct sg_lib_value_name_t sg_lib_variable_length_arr[] = {
     {0x1, 0, "Rebuild(32)"},
     {0x2, 0, "Regenerate(32)"},
-    {0x3, 0, "Xdread(32)"},     /* obsolete in SBC-3 r31 */
-    {0x4, 0, "Xdwrite(32)"},    /* obsolete in SBC-3 r31 */
-    {0x5, 0, "Xdwrite extended(32)"},
-    {0x6, 0, "Xpwrite(32)"},
-    {0x7, 0, "Xdwriteread(32)"},
-    {0x8, 0, "Xdwrite extended(64)"},
+    {0x3, 0, "Xdread(32)"},             /* obsolete in SBC-3 r31 */
+    {0x4, 0, "Xdwrite(32)"},            /* obsolete in SBC-3 r31 */
+    {0x5, 0, "Xdwrite extended(32)"},   /* obsolete in SBC-4 r15 */
+    {0x6, 0, "Xpwrite(32)"},            /* obsolete in SBC-4 r15 */
+    {0x7, 0, "Xdwriteread(32)"},        /* obsolete in SBC-4 r15 */
+    {0x8, 0, "Xdwrite extended(64)"},   /* obsolete in SBC-4 r15 */
     {0x9, 0, "Read(32)"},
     {0xa, 0, "Verify(32)"},
     {0xb, 0, "Write(32)"},
@@ -513,6 +517,7 @@ struct sg_lib_value_name_t sg_lib_zoning_out_arr[] = {
     {0x2, PDT_ZBC, "Finish zone"},
     {0x3, PDT_ZBC, "Open zone"},
     {0x4, PDT_ZBC, "Reset write pointer"},
+    {0x10, PDT_ZBC, "Sequentialize zone"},      /* zbc2r01b */
     {0xffff, 0, NULL},
 };
 
@@ -543,6 +548,10 @@ struct sg_lib_value_name_t sg_lib_read_buff_arr[] = {  /* opcode 0x3c */
 };
 
 struct sg_lib_value_name_t sg_lib_write_buff_arr[] = {  /* opcode 0x3b */
+    {0xffff, 0, NULL},
+};
+
+struct sg_lib_value_name_t sg_lib_read_pos_arr[] = {  /* opcode 0x34 (SSC) */
     {0xffff, 0, NULL},
 };
 
@@ -1471,11 +1480,12 @@ const char * sg_lib_pdt_strs[32] = {    /* should have 2**5 elements */
     "object based storage",
     "automation/driver interface",
     "security manager device",  /* obsolete, spc5r01 */
-    "zoned block commands",
+    "host managed zoned block",
     "0x15", "0x16", "0x17", "0x18",
     "0x19", "0x1a", "0x1b", "0x1c", "0x1d",
     "well known logical unit",
-    "no physical device on this lu",
+    "unknown or no device type", /* coupled with PQ=3 for not accessible
+                                    via this lu's port (try the other) */
 };
 
 const char * sg_lib_transport_proto_strs[] =
@@ -1506,3 +1516,337 @@ struct sg_lib_value_name_t sg_lib_scsi_feature_sets[] =
     {SCSI_FS_SBC_DRIVE_MAINT_2016, PDT_DISK, "Drive maintenance 2016"},
     {0x0, 0, NULL},     /* 0x0 is reserved sfs; trailing sentinel */
 };
+
+#if (SG_SCSI_STRINGS && HAVE_NVME && (! IGNORE_NVME))
+
+/* Commands sent to the NVMe Admin Queue (queue id 0) have the following
+ * names in the NVM Express 1.3a document dated 20171024 */
+struct sg_lib_simple_value_name_t sg_lib_nvme_admin_cmd_arr[] =
+{
+    {0x0,  "Delete I/O Submission Queue"},      /* first mandatory command */
+    {0x1,  "Create I/O Submission Queue"},
+    {0x2,  "Get Log Page"},
+    {0x4,  "Delete I/O Completion Queue"},
+    {0x5,  "Create I/O Completion Queue"},
+    {0x6,  "Identify"},
+    {0x8,  "Abort"},
+    {0x9,  "Set Features"},
+    {0xa,  "Get Features"},
+    {0xc,  "Asynchronous Event Request"},       /* last mandatory command */
+    {0xd,  "Namespace Management"},             /* first optional command */
+    {0x10, "Firmware commit"},
+    {0x11, "Firmware image download"},
+    {0x14, "Device Self-test"},
+    {0x15, "Namespace Attachment"},
+    {0x18, "Keep Alive"},
+    {0x19, "Directive Send"},
+    {0x1a, "Directive Receive"},
+    {0x1c, "Virtualization Management"},
+    {0x1d, "NVMe-MI Send"},    /* SES SEND DIAGNOSTIC cmd passes thru here */
+    {0x1e, "NVMe-MI Receive"}, /* RECEIVE DIAGNOSTIC RESULTS thru here */
+    {0x7c, "Doorbell Buffer Config"},
+    {0x7f, "NVMe over Fabrics"},
+
+    /* I/O command set specific 0x80 to 0xbf */
+    {0x80, "Format NVM"},               /* first NVM specific */
+    {0x81, "Security Send"},
+    {0x82, "Security Receive"},
+    {0x84, "Sanitize"},                 /* last NVM specific in 1.3a */
+    /* Vendor specific 0xc0 to 0xff */
+    {0xffff, NULL},                     /* Sentinel */
+};
+
+/* Commands sent any NVMe non-Admin Queue (queue id >0) for the NVM command
+ * set have the following names in the NVM Express 1.3a document dated
+ * 20171024 */
+struct sg_lib_simple_value_name_t sg_lib_nvme_nvm_cmd_arr[] =
+{
+    {0x0,  "Flush"},                    /* first mandatory command */
+    {0x1,  "Write"},
+    {0x2,  "Read"},                     /* last mandatory command */
+    {0x4,  "Write Uncorrectable"},      /* first optional command */
+    {0x5,  "Compare"},
+    {0x8,  "Write Zeroes"},
+    {0x9,  "Dataset Management"},
+    {0xd,  "Reservation Register"},
+    {0xe,  "Reservation Report"},
+    {0x11, "Reservation Acquire"},
+    {0x15, "Reservation Release"},      /* last optional command in 1.3a */
+
+    /* Vendor specific 0x80 to 0xff */
+    {0xffff, NULL},                     /* Sentinel */
+};
+
+
+/* .value is completion queue's DW3 as follows: ((DW3 >> 17) & 0x3ff)
+ * .peri_dev_type is an index for the sg_lib_scsi_status_sense_arr[]
+ * .name is taken from NVMe 1.3a document, section 4.6.1.2.1 with less
+ *   capitalization.
+ * NVMe term bits 31:17 of DW3 in the completion field as the "Status
+ * Field" (SF). Bit 31 is "Do not retry" (DNR) and bit 30 is "More" (M).
+ * Bits 29:28 are reserved, bit 27:25 are the "Status Code Type" (SCT)
+ * and bits 24:17 are the Status Code (SC). This table is in ascending
+ * order of its .value field so a binary search could be done on it.  */
+struct sg_lib_value_name_t sg_lib_nvme_cmd_status_arr[] =
+{
+    /* Generic command status values, Status Code Type (SCT): 0h
+     * Lowest 8 bits are the Status Code (SC), in this case:
+     *   00h - 7Fh: Applicable to Admin Command Set, or across multiple
+     *              command sets
+     *   80h - BFh: I/O Command Set Specific status codes
+     *   c0h - FFh: I/O Vendor Specific status codes            */
+    {0x0,   0, "Successful completion"},
+    {0x1,   1, "Invalid command opcode"},
+    {0x2,   2, "Invalid field in command"},
+    {0x3,   2, "Command id conflict"},
+    {0x4,   3, "Data transfer error"},
+    {0x5,   4, "Command aborted due to power loss notication"},
+    {0x6,   5, "Internal error"},
+    {0x7,   6, "Command abort requested"},
+    {0x8,   6, "Command aborted due to SQ deletion"},
+    {0x9,   6, "Command aborted due to failed fused command"},
+    {0xa,   6, "Command aborted due to missing fused command"},
+    {0xb,   7, "Invalid namespace or format"},
+    {0xc,   5, "Command sequence error"},
+    {0xd,   5, "Invalid SGL segment descriptor"},
+    {0xe,   5, "Invalid number of SGL descriptors"},
+    {0xf,   5, "Data SGL length invalid"},
+    {0x10,  5, "Matadata SGL length invalid"},
+    {0x11,  5, "SGL descriptor type invalid"},
+    {0x12,  5, "Invalid use of controller memory buffer"},
+    {0x13,  5, "PRP offset invalid"},
+    {0x14,  2, "Atomic write unit exceeded"},
+    {0x15,  8, "Operation denied"},
+    {0x16,  5, "SGL offset invalid"},
+    {0x17,  5, "Reserved [0x17]"},
+    {0x18,  5, "Host identifier inconsistent format"},
+    {0x19,  5, "Keep alive timeout expired"},
+    {0x1a,  5, "Keep alive timeout invalid"},
+    {0x1b,  6, "Command aborted due to Preempt and Abort"},
+    {0x1c, 10, "Sanitize failed"},
+    {0x1d, 11, "Sanitize in progress"},
+    {0x1e,  5, "SGL data block granularity invalid"},
+    {0x1f,  5, "Command not supported for queue in CMB"},
+
+    /* Generic command status values, NVM (I/O) Command Set */
+    {0x80, 12, "LBA out of range"},
+    {0x81,  3, "Capacity exceeded"},
+    {0x82, 13, "Namespace not ready"},
+    {0x83, 14, "Reservation conflict"},
+    {0x84, 15, "Format in progress"},
+    /* 0xc0 - 0xff: vendor specific */
+
+    /* Command specific status values, Status Code Type (SCT): 1h */
+    {0x100, 5, "Completion queue invalid"},
+    {0x101, 5, "Invalid queue identifier"},
+    {0x102, 5, "Invalid queue size"},
+    {0x103, 5, "Abort command limit exceeded"},
+    {0x104, 5, "Reserved [0x104]"},
+    {0x105, 5, "Asynchronous event request limit exceeded"},
+    {0x106, 5, "Invalid firmware slot"},
+    {0x107, 5, "Invalid firmware image"},
+    {0x108, 5, "Invalid interrupt vector"},
+    {0x109, 5, "Invalid log page"},
+    {0x10a,16, "Invalid format"},
+    {0x10b, 5, "Firmware activation requires conventional reset"},
+    {0x10c, 5, "Invalid queue deletion"},
+    {0x10d, 5, "Feature identifier not saveable"},
+    {0x10e, 5, "Feature not changeable"},
+    {0x10f, 5, "Feature not namespace specific"},
+    {0x110, 5, "Firmware activation requires NVM subsystem reset"},
+    {0x111, 5, "Firmware activation requires reset"},
+    {0x112, 5, "Firmware activation requires maximum time violation"},
+    {0x113, 5, "Firmware activation prohibited"},
+    {0x114, 5, "Overlapping range"},
+    {0x115, 5, "Namespace insufficient capacity"},
+    {0x116, 5, "Namespace identifier unavailable"},
+    {0x117, 5, "Reserved [0x107]"},
+    {0x118, 5, "Namespace already attached"},
+    {0x119, 5, "Namespace is private"},
+    {0x11a, 5, "Namespace not attached"},
+    {0x11b, 3, "Thin provisioning not supported"},
+    {0x11c, 3, "Controller list invalid"},
+    {0x11d,17, "Device self-test in progress"},
+    {0x11e,18, "Boot partition write prohibited"},
+    {0x11f, 5, "Invalid controller identifier"},
+    {0x120, 5, "Invalid secondary controller state"},
+    {0x121, 5, "Invalid number of controller resorces"},
+    {0x122, 5, "Invalid resorce identifier"},
+
+    /* Command specific status values, Status Code Type (SCT): 1h
+     * for NVM (I/O) Command Set */
+    {0x180, 2, "Conflicting attributes"},
+    {0x181,19, "Invalid protection information"},
+    {0x182,18, "Attempted write to read only range"},
+    /* 0x1c0 - 0x1ff: vendor specific */
+
+    /* Media and Data Integrity error values, Status Code Type (SCT): 2h */
+    {0x280,20, "Write fault"},
+    {0x281,21, "Unrecovered read error"},
+    {0x282,22, "End-to-end guard check error"},
+    {0x283,23, "End-to-end application tag check error"},
+    {0x284,24, "End-to-end reference tag check error"},
+    {0x285,25, "Compare failure"},
+    {0x286, 8, "Access denied"},
+    {0x287,26, "Deallocated or unwritten logical block"},
+    /* 0x2c0 - 0x2ff: vendor specific */
+
+    /* Leave this Sentinel value at end of this array */
+    {0x3ff, 0, NULL},
+};
+
+/* The sg_lib_nvme_cmd_status_arr[n].peri_dev_type field is an index
+ * to this array. It allows an NVMe status (error) value to be mapped
+ * to this SCSI tuple: status, sense_key, additional sense code (asc) and
+ * asc qualifier (ascq). For brevity SAM_STAT_CHECK_CONDITION is written
+ * as 0x2. */
+struct sg_lib_4tuple_u8 sg_lib_scsi_status_sense_arr[] =
+{
+    {SAM_STAT_GOOD, SPC_SK_NO_SENSE, 0, 0},     /* it's all good */ /* 0 */
+    {SAM_STAT_CHECK_CONDITION, SPC_SK_ILLEGAL_REQUEST, 0x20, 0x0},/* opcode */
+    {0x2, SPC_SK_ILLEGAL_REQUEST, 0x24, 0x0},   /* field in cdb */
+    {0x2, SPC_SK_MEDIUM_ERROR, 0x0, 0x0},
+    {SAM_STAT_TASK_ABORTED, SPC_SK_ABORTED_COMMAND, 0xb, 0x8},
+    {0x2, SPC_SK_HARDWARE_ERROR, 0x44, 0x0},   /* internal error */ /* 5 */
+    {SAM_STAT_TASK_ABORTED, SPC_SK_ABORTED_COMMAND, 0x0, 0x0},
+    {0x2, SPC_SK_ILLEGAL_REQUEST, 0x20, 0x9},   /* invalid LU */
+    {0x2, SPC_SK_ILLEGAL_REQUEST, 0x20, 0x2},   /* access denied */
+    {0x2, SPC_SK_ILLEGAL_REQUEST, 0x2c, 0x0},   /* cmd sequence error */
+    {0x2, SPC_SK_MEDIUM_ERROR, 0x31, 0x3},   /* sanitize failed */ /* 10 */
+    {0x2, SPC_SK_NOT_READY, 0x4, 0x1b}, /* sanitize in progress */
+    {0x2, SPC_SK_ILLEGAL_REQUEST, 0x21, 0x0},   /* LBA out of range */
+    {0x2, SPC_SK_NOT_READY, 0x4, 0x0},  /* not reportable; 0x1: becoming */
+    {SAM_STAT_RESERVATION_CONFLICT, 0x0, 0x0, 0x0},
+    {0x2, SPC_SK_NOT_READY, 0x4, 0x4},  /* format in progress */  /* 15 */
+    {0x2, SPC_SK_ILLEGAL_REQUEST, 0x31, 0x1},  /* format failed */
+    {0x2, SPC_SK_NOT_READY, 0x4, 0x9},  /* self-test in progress */
+    {0x2, SPC_SK_DATA_PROTECT, 0x27, 0x0},      /* write prohibited */
+    {0x2, SPC_SK_ILLEGAL_REQUEST, 0x10, 0x5},  /* protection info */
+    {0x2, SPC_SK_MEDIUM_ERROR, 0x3, 0x0}, /* periph dev w fault */ /* 20 */
+    {0x2, SPC_SK_MEDIUM_ERROR, 0x11, 0x0},      /* unrecoc rd */
+    {0x2, SPC_SK_MEDIUM_ERROR, 0x10, 0x1},      /* PI guard */
+    {0x2, SPC_SK_MEDIUM_ERROR, 0x10, 0x2},      /* PI app tag */
+    {0x2, SPC_SK_MEDIUM_ERROR, 0x10, 0x2},      /* PI app tag */
+    {0x2, SPC_SK_MISCOMPARE, 0x1d, 0x0},        /* during verify */ /* 25 */
+    {0x2, SPC_SK_MEDIUM_ERROR, 0x21, 0x6},      /* read invalid data */
+
+    /* Leave this Sentinel value at end of this array */
+    {0xff, 0xff, 0xff, 0xff},
+};
+
+/* These are the error (or warning) exit status values and their associated
+ * strings. They combine utility input syntax errors, SCSI status and sense
+ * key categories, OS errors (e.g. ENODEV for device not found), one that
+ * indicates NVMe non-zero status plus listing those that a Unix OS generates
+ * for any executable (that fails). The convention is 0 means no error and
+ * that in Unix the exit status is an (unsigned) 8 bit value. */
+struct sg_value_2names_t sg_exit_str_arr[] = {
+    {0,  "No errors", "may also convey true"},
+    {1,  "Syntax error", "command line options (usually)"},
+    {2,  "Device not ready", "type: sense key"},
+    {3,  "Medium or hardware error", "type: sense key (plus blank check for "
+         "tape)"},
+    {5,  "Illegal request", "type: sense key, apart from Invalid opcode"},
+    {6,  "Unit attention", "type: sense key"},
+    {7,  "Data protect", "type: sense key; write protected media?"},
+    {9,  "Illegal request, Invalid opcode", "type: sense key + asc,ascq"},
+    {10, "Copy aborted", "type: sense key"},
+    {11, "Aborted command",
+         "type: sense key, other than protection related (asc=0x10)"},
+    {14, "Miscompare", "type: sense key"},
+    {15, "File error", NULL},
+    {17, "Illegal request with Info field", NULL},
+    {18, "Medium or hardware error with Info", NULL},
+    {20, "No sense key", "type: probably additional sense code"},
+    {21, "Recovered error (warning)", "tye: sense key"},
+         /* N.B. this is a warning not error */
+    {22, "LBA out of range", NULL},
+    {24, "Reservation conflict", "type: SCSI status"},
+    {25, "Condition met", "type: SCSI status"}, /* from PRE-FETCH command */
+    {26, "Busy", "type: SCSI status"},   /* could be transport issue */
+    {27, "Task set full", "type: SCSI status"},
+    {28, "ACA aactive", "type: SCSI status"},
+    {29, "Task aborted", "type: SCSI status"},
+    {31, "Contradict", "command line options contradict or select bad mode"},
+    {32, "Logic error", "unexpected situation, contact author"},
+    {33, "SCSI command timeout", NULL},         /* OS timed out command */
+    {36, "No errors (false)", NULL},
+    {40, "Aborted command, protection error", NULL},
+    {41, "Aborted command, protection error with Info field", NULL},
+    {47, "flock (Unix system call) error", NULL},       /* ddpt */
+    {48, "NVMe command with non-zero status", NULL},
+    {50, "An OS error occurred", "(errno > 46 or negative)"},
+    /* OS errors (errno in Unix) from 1 to 46 mapped into this range */
+    {97, "Malformed SCSI command", "trouble building command"},
+    {98, "Some other sense error", "try '-v' option for more information"},
+    {99, "Some other error", "possible transport of driver issue"},
+    {100, "Parameter list length error", NULL}, /* these for ddpt, xcopy */
+    {101, "Invalid field in parameter", NULL},
+    {102, "Too many segments in parameters", NULL},
+    {103, "Target underrun", NULL},
+    {104, "Target overrun", NULL},
+    {105, "Operation in progress", NULL},
+    {106, "Insufficient resources to create ROD", NULL},
+    {107, "Insufficient resources to create ROD token", NULL},
+    {108, "Commands cleared by device server", NULL},
+    {109, "See leave_reason for error", NULL},        /* internal error */
+    /* DDPT_CAT_TOKOP_BASE: asc=0x23, ascq=110 follow */
+    {110, "Invalid token operation, cause not reportable", NULL},
+    {111, "Invalid token operation, unsupported token type", NULL},
+    {112, "Invalid token operation, remote token usage not supported", NULL},
+    {113, "Invalid token operation, remote token creation not supported",
+          NULL},
+    {114, "Invalid token operation, token unknown", NULL},
+    {115, "Invalid token operation, token corrupt", NULL},
+    {116, "Invalid token operation, token revoked", NULL},
+    {117, "Invalid token operation, token expired", NULL},
+    {118, "Invalid token operation, token cancelled", NULL},
+    {119, "Invalid token operation, token deleted", NULL},
+    {120, "Invalid token operation, invalid token length", NULL},
+
+    /* The following error codes are generated by a Unix OS */
+    {126, "Utility found but did not have execute permissions", NULL},
+    {127, "Utility to be executed was not found", NULL},
+    {128, "Utility stopped/aborted by signal number: 0", "signal # 0 ??"},
+    /* 128 + <signal_number>: signal number that aborted the utility.
+                              real time signals start at offset SIGRTMIN */
+    /* OS signals from 1 to 126 mapped into this range (129 to 254) */
+    {255, "Utility returned 255 or higher", "Windows error number?"},
+    {0xffff, NULL, NULL},       /* end marking sentinel */
+};
+
+#else           /* (SG_SCSI_STRINGS && HAVE_NVME && (! IGNORE_NVME)) */
+
+struct sg_lib_simple_value_name_t sg_lib_nvme_admin_cmd_arr[] =
+{
+
+    /* Vendor specific 0x80 to 0xff */
+    {0xffff, NULL},                     /* Sentinel */
+};
+
+struct sg_lib_simple_value_name_t sg_lib_nvme_nvm_cmd_arr[] =
+{
+
+    /* Vendor specific 0x80 to 0xff */
+    {0xffff, NULL},                     /* Sentinel */
+};
+
+struct sg_lib_value_name_t sg_lib_nvme_cmd_status_arr[] =
+{
+
+    /* Leave this Sentinel value at end of this array */
+    {0x3ff, 0, NULL},
+};
+
+struct sg_lib_4tuple_u8 sg_lib_scsi_status_sense_arr[] =
+{
+
+    /* Leave this Sentinel value at end of this array */
+    {0xff, 0xff, 0xff, 0xff},
+};
+
+struct sg_value_2names_t sg_exit_str_arr[] = {
+    {0xffff, NULL, NULL},       /* end marking sentinel */
+};
+
+#endif           /* (SG_SCSI_STRINGS && HAVE_NVME && (! IGNORE_NVME)) */

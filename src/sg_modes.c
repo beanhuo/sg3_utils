@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2000-2017 D. Gilbert
+ *  Copyright (C) 2000-2018 D. Gilbert
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
  *  the Free Software Foundation; either version 2, or (at your option)
@@ -19,6 +19,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <ctype.h>
+#include <errno.h>
 #include <getopt.h>
 
 #ifdef HAVE_CONFIG_H
@@ -29,7 +30,7 @@
 #include "sg_unaligned.h"
 #include "sg_pr2serr.h"
 
-static const char * version_str = "1.54 20171030";
+static const char * version_str = "1.64 20180626";
 
 #define DEF_ALLOC_LEN (1024 * 4)
 #define DEF_6_ALLOC_LEN 252
@@ -61,6 +62,7 @@ static struct option long_options[] = {
         {"raw", no_argument, 0, 'r'},
         {"read-write", no_argument, 0, 'w'},
         {"read_write", no_argument, 0, 'w'},
+        {"readwrite", no_argument, 0, 'w'},
         {"six", no_argument, 0, '6'},
         {"verbose", no_argument, 0, 'v'},
         {"version", no_argument, 0, 'V'},
@@ -75,16 +77,17 @@ struct opts_t {
     bool do_list;
     bool do_llbaa;
     bool do_six;
-    bool do_version;
     bool o_readwrite;
     bool subpg_code_given;
     bool opt_new;
+    bool verbose_given;
+    bool version_given;
     int do_all;
     int do_help;
     int do_hex;
     int maxlen;
     int do_raw;
-    int do_verbose;
+    int verbose;
     int page_control;
     int pg_code;
     int subpg_code;
@@ -198,7 +201,7 @@ usage_for(const struct opts_t * op)
 /* Processes command line options according to new option format. Returns
  * 0 is ok, else SG_LIB_SYNTAX_ERROR is returned. */
 static int
-process_cl_new(struct opts_t * op, int argc, char * argv[])
+new_parse_cmd_line(struct opts_t * op, int argc, char * argv[])
 {
     int c, n, nn;
     char * cp;
@@ -299,10 +302,11 @@ process_cl_new(struct opts_t * op, int argc, char * argv[])
             op->do_six = true;
             break;
         case 'v':
-            ++op->do_verbose;
+            op->verbose_given = true;
+            ++op->verbose;
             break;
         case 'V':
-            op->do_version = true;
+            op->version_given = true;
             break;
         case 'w':
             op->o_readwrite = true;
@@ -334,7 +338,7 @@ process_cl_new(struct opts_t * op, int argc, char * argv[])
 /* Processes command line options according to old option format. Returns
  * 0 is ok, else SG_LIB_SYNTAX_ERROR is returned. */
 static int
-process_cl_old(struct opts_t * op, int argc, char * argv[])
+old_parse_cmd_line(struct opts_t * op, int argc, char * argv[])
 {
     bool jmp_out;
     int k, plen, num, n;
@@ -389,10 +393,11 @@ process_cl_old(struct opts_t * op, int argc, char * argv[])
                     op->do_raw += 2;
                     break;
                 case 'v':
-                    ++op->do_verbose;
+                    op->verbose_given = true;
+                    ++op->verbose;
                     break;
                 case 'V':
-                    op->do_version = true;
+                    op->version_given = true;
                     break;
                 case '?':
                     ++op->do_help;
@@ -483,7 +488,7 @@ process_cl_old(struct opts_t * op, int argc, char * argv[])
  * of these options is detected (when processing the other format), processing
  * stops and is restarted using the other format. Clear? */
 static int
-process_cl(struct opts_t * op, int argc, char * argv[])
+parse_cmd_line(struct opts_t * op, int argc, char * argv[])
 {
     int res;
     char * cp;
@@ -491,24 +496,24 @@ process_cl(struct opts_t * op, int argc, char * argv[])
     cp = getenv("SG3_UTILS_OLD_OPTS");
     if (cp) {
         op->opt_new = false;
-        res = process_cl_old(op, argc, argv);
+        res = old_parse_cmd_line(op, argc, argv);
         if ((0 == res) && op->opt_new)
-            res = process_cl_new(op, argc, argv);
+            res = new_parse_cmd_line(op, argc, argv);
     } else {
         op->opt_new = true;
-        res = process_cl_new(op, argc, argv);
+        res = new_parse_cmd_line(op, argc, argv);
         if ((0 == res) && (! op->opt_new))
-            res = process_cl_old(op, argc, argv);
+            res = old_parse_cmd_line(op, argc, argv);
     }
     return res;
 }
 
 static void
-dStrRaw(const char* str, int len)
+dStrRaw(const uint8_t * str, int len)
 {
     int k;
 
-    for (k = 0 ; k < len; ++k)
+    for (k = 0; k < len; ++k)
         printf("%c", str[k]);
 }
 
@@ -549,7 +554,7 @@ static struct page_code_desc pc_desc_disk[] = {
     {0xa, 0x5, "IO advice hints grouping"}, /* added sbc4r06 */
     {0xa, 0x6, "Background operation control"}, /* added sbc4r07 */
     {0xa, 0xf1, "Parallel ATA control (SAT)"},
-    {0xa, 0xf2, "Reserved (SATA control) (SAT)"},
+/*  {0xa, 0xf2, "Reserved (SATA control) (SAT)"}, // proposed + dropped ?? */
     {0xb, 0x0, "Medium types supported (obsolete)"},
     {0xc, 0x0, "Notch and partition (obsolete)"},
     {0xd, 0x0, "Power condition (obsolete, moved to 0x1a)"},
@@ -624,34 +629,34 @@ get_mpage_tbl_size(int scsi_ptype, int * sizep)
     switch (scsi_ptype)
     {
         case -1:        /* common list */
-            *sizep = sizeof(pc_desc_common) / sizeof(pc_desc_common[0]);
+            *sizep = SG_ARRAY_SIZE(pc_desc_common);
             return &pc_desc_common[0];
         case PDT_DISK:         /* disk (direct access) type devices */
         case PDT_WO:
         case PDT_OPTICAL:
-            *sizep = sizeof(pc_desc_disk) / sizeof(pc_desc_disk[0]);
+            *sizep = SG_ARRAY_SIZE(pc_desc_disk);
             return &pc_desc_disk[0];
         case PDT_TAPE:         /* tape devices */
         case PDT_PRINTER:
-            *sizep = sizeof(pc_desc_tape) / sizeof(pc_desc_tape[0]);
+            *sizep = SG_ARRAY_SIZE(pc_desc_tape);
             return &pc_desc_tape[0];
         case PDT_MMC:         /* cd/dvd/bd devices */
-            *sizep = sizeof(pc_desc_cddvd) / sizeof(pc_desc_cddvd[0]);
+            *sizep = SG_ARRAY_SIZE(pc_desc_cddvd);
             return &pc_desc_cddvd[0];
         case PDT_MCHANGER:         /* medium changer devices */
-            *sizep = sizeof(pc_desc_smc) / sizeof(pc_desc_smc[0]);
+            *sizep = SG_ARRAY_SIZE(pc_desc_smc);
             return &pc_desc_smc[0];
         case PDT_SAC:       /* storage array devices */
-            *sizep = sizeof(pc_desc_scc) / sizeof(pc_desc_scc[0]);
+            *sizep = SG_ARRAY_SIZE(pc_desc_scc);
             return &pc_desc_scc[0];
         case PDT_SES:       /* enclosure services devices */
-            *sizep = sizeof(pc_desc_ses) / sizeof(pc_desc_ses[0]);
+            *sizep = SG_ARRAY_SIZE(pc_desc_ses);
             return &pc_desc_ses[0];
         case PDT_RBC:       /* simplified direct access device */
-            *sizep = sizeof(pc_desc_rbc) / sizeof(pc_desc_rbc[0]);
+            *sizep = SG_ARRAY_SIZE(pc_desc_rbc);
             return &pc_desc_rbc[0];
         case PDT_ADC:       /* automation device/interface */
-            *sizep = sizeof(pc_desc_adc) / sizeof(pc_desc_adc[0]);
+            *sizep = SG_ARRAY_SIZE(pc_desc_adc);
             return &pc_desc_adc[0];
     }
     *sizep = 0;
@@ -695,16 +700,16 @@ get_mpage_trans_tbl_size(int t_proto, int * sizep)
     switch (t_proto)
     {
         case TPROTO_FCP:
-            *sizep = sizeof(pc_desc_t_fcp) / sizeof(pc_desc_t_fcp[0]);
+            *sizep = SG_ARRAY_SIZE(pc_desc_t_fcp);
             return &pc_desc_t_fcp[0];
         case TPROTO_SPI:
-            *sizep = sizeof(pc_desc_t_spi4) / sizeof(pc_desc_t_spi4[0]);
+            *sizep = SG_ARRAY_SIZE(pc_desc_t_spi4);
             return &pc_desc_t_spi4[0];
         case TPROTO_SAS:
-            *sizep = sizeof(pc_desc_t_sas) / sizeof(pc_desc_t_sas[0]);
+            *sizep = SG_ARRAY_SIZE(pc_desc_t_sas);
             return &pc_desc_t_sas[0];
         case TPROTO_ADT:
-            *sizep = sizeof(pc_desc_t_adc) / sizeof(pc_desc_t_adc[0]);
+            *sizep = SG_ARRAY_SIZE(pc_desc_t_adc);
             return &pc_desc_t_adc[0];
     }
     *sizep = 0;
@@ -890,14 +895,14 @@ examine_pages(int sg_fd, int inq_pdt, bool encserv, bool mchngr,
     bool header_printed;
     int k, res, mresp_len, len, resid;
     const char * cp;
-    unsigned char rbuf[256];
+    uint8_t rbuf[256];
 
     mresp_len = (op->do_raw || op->do_hex) ? sizeof(rbuf) : 4;
     for (header_printed = false, k = 0; k < PG_CODE_MAX; ++k) {
         resid = 0;
         if (op->do_six) {
             res = sg_ll_mode_sense6(sg_fd, 0, 0, k, 0, rbuf, mresp_len,
-                                    true, op->do_verbose);
+                                    true, op->verbose);
             if (SG_LIB_CAT_INVALID_OP == res) {
                 pr2serr(">>>>>> try again without the '-6' switch for a 10 "
                         "byte MODE SENSE command\n");
@@ -908,7 +913,7 @@ examine_pages(int sg_fd, int inq_pdt, bool encserv, bool mchngr,
             }
         } else {
             res = sg_ll_mode_sense10_v2(sg_fd, 0, 0, 0, k, 0, rbuf, mresp_len,
-                                        0, &resid, true, op->do_verbose);
+                                        0, &resid, true, op->verbose);
             if (SG_LIB_CAT_INVALID_OP == res) {
                 pr2serr(">>>>>> try again with a '-6' switch for a 6 byte "
                         "MODE SENSE command\n");
@@ -932,11 +937,11 @@ examine_pages(int sg_fd, int inq_pdt, bool encserv, bool mchngr,
             if (len > mresp_len)
                 len = mresp_len;
             if (op->do_raw) {
-                dStrRaw((const char *)rbuf, len);
+                dStrRaw(rbuf, len);
                 continue;
             }
             if (op->do_hex > 2) {
-                dStrHex((const char *)rbuf, len, -1);
+                hex2stdout(rbuf, len, -1);
                 continue;
             }
             if (! header_printed) {
@@ -949,11 +954,11 @@ examine_pages(int sg_fd, int inq_pdt, bool encserv, bool mchngr,
             else
                 printf("    [0x%x]\n", k);
             if (op->do_hex)
-                dStrHex((const char *)rbuf, len, 1);
-        } else if (op->do_verbose) {
+                hex2stdout(rbuf, len, 1);
+        } else if (op->verbose) {
             char b[80];
 
-            sg_get_category_sense_str(res, sizeof(b), b, op->do_verbose - 1);
+            sg_get_category_sense_str(res, sizeof(b), b, op->verbose - 1);
             pr2serr("MODE SENSE (%s) failed: %s\n", (op->do_six ? "6" : "10"),
                     b);
         }
@@ -975,35 +980,51 @@ main(int argc, char * argv[])
     bool resp_mode6, longlba, spf;
     bool encserv = false;
     bool mchngr = false;
-    unsigned char uc;
-    int sg_fd, k, num, len, res, md_len, bd_len, page_num, resid;
+    uint8_t uc;
+    int k, num, len, res, md_len, bd_len, page_num, resid;
     int density_code_off, t_proto, inq_pdt, num_ua_pages;
+    int sg_fd = -1;
     int ret = 0;
-    int rsp_buff_size = DEF_ALLOC_LEN;
+    int rsp_buff_sz = DEF_ALLOC_LEN;
     const char * descp;
     struct opts_t * op;
-    unsigned char * rsp_buff = NULL;
-    unsigned char * malloc_rsp_buff = NULL;
-    unsigned char * bp;
+    uint8_t * rsp_buff = NULL;
+    uint8_t * free_rsp_buff = NULL;
+    uint8_t * bp;
     const char * cdbLenStr;
     struct sg_simple_inquiry_resp inq_out;
     struct opts_t opts;
     char b[80];
-    unsigned char def_rsp_buff[DEF_ALLOC_LEN];
     char ebuff[EBUFF_SZ];
     char pdt_name[64];
 
     op = &opts;
     memset(op, 0, sizeof(opts));
     op->pg_code = -1;
-    res = process_cl(op, argc, argv);
+    res = parse_cmd_line(op, argc, argv);
     if (res)
-        return SG_LIB_SYNTAX_ERROR;
+        return res;
     if (op->do_help) {
         usage_for(op);
         return 0;
     }
-    if (op->do_version) {
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (op->verbose_given && op->version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        op->verbose_given = false;
+        op->version_given = false;
+        op->verbose = 0;
+    } else if (! op->verbose_given) {
+        pr2serr("set '-vv'\n");
+        op->verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", op->verbose);
+#else
+    if (op->verbose_given && op->version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (op->version_given) {
         pr2serr("Version string: %s\n", version_str);
         return 0;
     }
@@ -1032,31 +1053,28 @@ main(int argc, char * argv[])
 
     if (op->do_examine && (op->pg_code >= 0)) {
         pr2serr("can't give '-e' and a page number\n");
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CONTRADICT;
     }
 
     if (op->do_six && op->do_llbaa) {
         pr2serr("LLBAA not defined for MODE SENSE 6, try without '-L'\n");
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CONTRADICT;
     }
     if (op->maxlen > 0) {
         if (op->do_six && (op->maxlen > 255)) {
             pr2serr("For Mode Sense (6) maxlen cannot exceed 255\n");
             return SG_LIB_SYNTAX_ERROR;
         }
-        if (op->maxlen > DEF_ALLOC_LEN) {
-            malloc_rsp_buff = (unsigned char *)malloc(op->maxlen);
-            if (NULL == malloc_rsp_buff) {
-                pr2serr("Unable to malloc maxlen=%d bytes\n", op->maxlen);
-                return SG_LIB_SYNTAX_ERROR;
-        }
-            rsp_buff = malloc_rsp_buff;
-        } else
-            rsp_buff = def_rsp_buff;
-        rsp_buff_size = op->maxlen;
+        rsp_buff = sg_memalign(op->maxlen, 0, &free_rsp_buff, false);
+        rsp_buff_sz = op->maxlen;
     } else {    /* maxlen == 0 */
-        rsp_buff_size = op->do_six ? DEF_6_ALLOC_LEN : DEF_ALLOC_LEN;
-        rsp_buff = def_rsp_buff;
+        rsp_buff = sg_memalign(rsp_buff_sz, 0, &free_rsp_buff, false);
+        if (op->do_six)
+            rsp_buff_sz = DEF_6_ALLOC_LEN;
+    }
+    if (NULL == rsp_buff) {     /* check for both sg_memalign()s */
+        pr2serr("Unable to allocate %d bytes on heap\n", rsp_buff_sz);
+        return sg_convert_errno(ENOMEM);
     }
     /* If no pages or list selected than treat as 'a' */
     if (! ((op->pg_code >= 0) || op->do_all || op->do_list || op->do_examine))
@@ -1065,23 +1083,23 @@ main(int argc, char * argv[])
     if (op->do_raw) {
         if (sg_set_binary_mode(STDOUT_FILENO) < 0) {
             perror("sg_set_binary_mode");
-            return SG_LIB_FILE_ERROR;
+            ret = SG_LIB_FILE_ERROR;
+            goto fini;
         }
     }
 
     if ((sg_fd = sg_cmds_open_device(op->device_name, ! op->o_readwrite,
-                                     op->do_verbose)) < 0) {
+                                     op->verbose)) < 0) {
         pr2serr("error opening file: %s: %s\n", op->device_name,
                 safe_strerror(-sg_fd));
-        if (malloc_rsp_buff)
-            free(malloc_rsp_buff);
-        return SG_LIB_FILE_ERROR;
+        ret = sg_convert_errno(-sg_fd);
+        goto fini;
     }
 
-    if (sg_simple_inquiry(sg_fd, &inq_out, 1, op->do_verbose)) {
+    if ((res = sg_simple_inquiry(sg_fd, &inq_out, true, op->verbose))) {
         pr2serr("%s doesn't respond to a SCSI INQUIRY\n", op->device_name);
-        ret = SG_LIB_CAT_OTHER;
-        goto finish;
+        ret = (res > 0) ? res : sg_convert_errno(-res);
+        goto fini;
     }
     inq_pdt = inq_out.peripheral_type;
     encserv = !! (0x40 & inq_out.byte_6);
@@ -1095,11 +1113,11 @@ main(int argc, char * argv[])
             list_page_codes(inq_pdt, encserv, mchngr, op->subpg_code);
         else
             list_page_codes(inq_pdt, encserv, mchngr, -1);
-        goto finish;
+        goto fini;
     }
     if (op->do_examine) {
         ret = examine_pages(sg_fd, inq_pdt, encserv, mchngr, op);
-        goto finish;
+        goto fini;
     }
     if (PG_CODE_ALL == op->pg_code) {
         if (0 == op->do_all)
@@ -1116,25 +1134,24 @@ main(int argc, char * argv[])
             else
                 pr2serr("'-r' requires a specific (sub)page, not all\n");
             usage_for(op);
-            ret = SG_LIB_SYNTAX_ERROR;
-            goto finish;
+            ret = SG_LIB_CONTRADICT;
+            goto fini;
         }
     }
 
-    memset(rsp_buff, 0, rsp_buff_size);
     resid = 0;
     if (op->do_six) {
         res = sg_ll_mode_sense6(sg_fd, op->do_dbd, op->page_control,
                                 op->pg_code, op->subpg_code, rsp_buff,
-                                rsp_buff_size, true, op->do_verbose);
+                                rsp_buff_sz, true, op->verbose);
         if (SG_LIB_CAT_INVALID_OP == res)
             pr2serr(">>>>>> try again without the '-6' switch for a 10 byte "
                     "MODE SENSE command\n");
     } else {
         res = sg_ll_mode_sense10_v2(sg_fd, op->do_llbaa, op->do_dbd,
                                     op->page_control, op->pg_code,
-                                    op->subpg_code, rsp_buff, rsp_buff_size,
-                                    0, &resid, true, op->do_verbose);
+                                    op->subpg_code, rsp_buff, rsp_buff_sz,
+                                    0, &resid, true, op->verbose);
         if (SG_LIB_CAT_INVALID_OP == res)
             pr2serr(">>>>>> try again with a '-6' switch for a 6 byte MODE "
                     "SENSE command\n");
@@ -1150,7 +1167,7 @@ main(int argc, char * argv[])
             pr2serr("invalid field in cdb (perhaps page 0x%x not "
                     "supported)\n", op->pg_code);
     } else if (res) {
-        sg_get_category_sense_str(res, sizeof(b), b, op->do_verbose);
+        sg_get_category_sense_str(res, sizeof(b), b, op->verbose);
         pr2serr("%s\n", b);
     }
     ret = res;
@@ -1186,51 +1203,51 @@ main(int argc, char * argv[])
                        "     decoded as %s byte response:\n",
                        cdbLenStr, (resp_mode6 ? "6" : "10"));
         }
-        rsp_buff_size -= resid;
-        if (rsp_buff_size < 0) {
+        rsp_buff_sz -= resid;
+        if (rsp_buff_sz < 0) {
             pr2serr("MS(%s) resid=%d implies negative response length "
-                    "(%d)\n", cdbLenStr, resid, rsp_buff_size);
+                    "(%d)\n", cdbLenStr, resid, rsp_buff_sz);
             ret = SG_LIB_WILD_RESID;
-            goto finish;
+            goto fini;
         }
         if (resp_mode6) {
-            if (rsp_buff_size < 4) {
+            if (rsp_buff_sz < 4) {
                 pr2serr("MS(6) resid=%d implies abridged header length "
-                        "(%d)\n", resid, rsp_buff_size);
+                        "(%d)\n", resid, rsp_buff_sz);
                 ret = SG_LIB_WILD_RESID;
-                goto finish;
+                goto fini;
             }
             headerlen = 4;
             medium_type = rsp_buff[1];
             specific = rsp_buff[2];
             longlba = false;
         } else {        /* MODE SENSE(10) with resid */
-            if (rsp_buff_size < 8) {
+            if (rsp_buff_sz < 8) {
                 pr2serr("MS(10) resid=%d implies abridged header length "
-                        "(%d)\n", resid, rsp_buff_size);
+                        "(%d)\n", resid, rsp_buff_sz);
                 ret = SG_LIB_WILD_RESID;
-                goto finish;
+                goto fini;
             }
             headerlen = 8;
             medium_type = rsp_buff[2];
             specific = rsp_buff[3];
             longlba = !!(rsp_buff[4] & 1);
         }
-        md_len = sg_msense_calc_length(rsp_buff, rsp_buff_size, resp_mode6,
+        md_len = sg_msense_calc_length(rsp_buff, rsp_buff_sz, resp_mode6,
                                        &bd_len);
         if (md_len < 0) {
             pr2serr("MS(%s): sg_msense_calc_length() failed\n", cdbLenStr);
             ret = SG_LIB_CAT_MALFORMED;
-            goto finish;
+            goto fini;
         }
-        md_len = (md_len < rsp_buff_size) ? md_len : rsp_buff_size;
+        md_len = (md_len < rsp_buff_sz) ? md_len : rsp_buff_sz;
         if ((bd_len + headerlen) > md_len) {
             pr2serr("Invalid block descriptor length=%d, ignore\n", bd_len);
             bd_len = 0;
         }
         if (op->do_raw || (op->do_hex > 2)) {
             if (1 == op->do_raw)
-                dStrRaw((const char *)rsp_buff, md_len);
+                dStrRaw(rsp_buff, md_len);
             else if (op->do_raw > 1) {
                 bp = rsp_buff + bd_len + headerlen;
                 md_len -= bd_len + headerlen;
@@ -1241,14 +1258,16 @@ main(int argc, char * argv[])
                 for (k = 0; k < len; ++k)
                     printf("%02x\n", bp[k]);
             } else
-                dStrHex((const char *)rsp_buff, md_len, -1);
-            goto finish;
+                hex2stdout(rsp_buff, md_len, -1);
+            goto fini;
         }
         if (1 == op->do_hex) {
-            dStrHex((const char *)rsp_buff, md_len, 1);
-            goto finish;
-        } else if (op->do_hex > 1)
-            dStrHex((const char *)rsp_buff, headerlen, 1);
+            hex2stdout(rsp_buff, md_len, 1);
+            goto fini;
+        } else if (op->do_hex > 1) {
+            hex2stdout(rsp_buff, headerlen, 1);
+            goto fini;
+        }
         if (0 == inq_pdt)
             printf("  Mode data length=%d, medium type=0x%.2x, WP=%d,"
                    " DpoFua=%d, longlba=%d\n", md_len, medium_type,
@@ -1257,12 +1276,12 @@ main(int argc, char * argv[])
             printf("  Mode data length=%d, medium type=0x%.2x, specific"
                    " param=0x%.2x, longlba=%d\n", md_len, medium_type,
                    specific, (int)longlba);
-        if (md_len > rsp_buff_size) {
+        if (md_len > rsp_buff_sz) {
             printf("Only fetched %d bytes of response, truncate output\n",
-                   rsp_buff_size);
-            md_len = rsp_buff_size;
-            if (bd_len + headerlen > rsp_buff_size)
-                bd_len = rsp_buff_size - headerlen;
+                   rsp_buff_sz);
+            md_len = rsp_buff_sz;
+            if (bd_len + headerlen > rsp_buff_sz)
+                bd_len = rsp_buff_sz - headerlen;
         }
         if (! op->do_dbout) {
             printf("  Block descriptor length=%d\n", bd_len);
@@ -1287,7 +1306,7 @@ main(int argc, char * argv[])
                 while (num > 0) {
                     printf("   Density code=0x%x\n",
                            *(bp + density_code_off));
-                    dStrHex((const char *)bp, len, 1);
+                    hex2stdout(bp, len, 1);
                     bp += len;
                     num -= len;
                 }
@@ -1354,15 +1373,21 @@ main(int argc, char * argv[])
                 pr2serr(">>> page length (%d) > 256 bytes, unlikely trim\n"
                         "    Try '-f' option\n", len);
             }
-            dStrHex((const char *)bp, num , 1);
+            hex2stdout(bp, num , 1);
             bp += len;
             md_len -= len;
         }
     }
 
-finish:
-    sg_cmds_close_device(sg_fd);
-    if (malloc_rsp_buff)
-        free(malloc_rsp_buff);
+fini:
+    if (sg_fd >= 0)
+        sg_cmds_close_device(sg_fd);
+    if (free_rsp_buff)
+        free(free_rsp_buff);
+    if (0 == op->verbose) {
+        if (! sg_if_can2stderr("sg_modes failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' or '-vv' for "
+                    "more information\n");
+    }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006-2016 Douglas Gilbert.
+ * Copyright (c) 2006-2018 Douglas Gilbert.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -64,7 +64,7 @@
 
 #define EBUFF_SZ 256
 
-static const char * version_str = "1.01 20160528";
+static const char * version_str = "1.03 20180220";
 
 static struct option long_options[] = {
         {"help", no_argument, 0, 'h'},
@@ -135,7 +135,7 @@ static const char * find_phy_desc(int id)
     return NULL;
 }
 
-static void dStrRaw(const char* str, int len)
+static void dStrRaw(const uint8_t * str, int len)
 {
     int k;
 
@@ -146,14 +146,14 @@ static void dStrRaw(const char* str, int len)
 int main(int argc, char * argv[])
 {
     int sg_fd, c, k, j, ok, res, id, len, vendor;
-    unsigned char apt_cdb[SAT_ATA_PASS_THROUGH16_LEN] =
+    uint8_t apt_cdb[SAT_ATA_PASS_THROUGH16_LEN] =
                 {SAT_ATA_PASS_THROUGH16, 0, 0, 0, 0, 0, 0, 0,
                  0, 0, 0, 0, 0, 0, 0, 0};
     sg_io_hdr_t io_hdr;
     char * device_name = 0;
     char ebuff[EBUFF_SZ];
-    unsigned char inBuff[READ_LOG_EXT_RESPONSE_LEN];
-    unsigned char sense_buffer[64];
+    uint8_t inBuff[READ_LOG_EXT_RESPONSE_LEN];
+    uint8_t sense_buffer[64];
     int hex = 0;
     int ignore = 0;
     int raw = 0;
@@ -165,7 +165,7 @@ int main(int argc, char * argv[])
     int t_dir = 1;      /* 0 -> to device, 1 -> from device */
     int byte_block = 1; /* 0 -> bytes, 1 -> 512 byte blocks */
     int t_length = 2;   /* 0 -> no data transferred, 2 -> sector count */
-    const unsigned char * cucp;
+    const uint8_t * cucp;
     int ret = 0;
     uint64_t ull;
     const char * cp;
@@ -304,12 +304,12 @@ int main(int argc, char * argv[])
 
     if (ok) { /* output result if it is available */
         if (raw > 0)
-            dStrRaw((const char *)inBuff, 512);
+            dStrRaw(inBuff, 512);
         else {
             if (verbose && hex)
                 fprintf(stderr, "Response to READ LOG EXT (page=11h):\n");
             if (1 == hex)
-                dStrHex((const char *)inBuff, 512, 0);
+                hex2stdout(inBuff, 512, 0);
             else if (hex > 1)
                 dWordHex((const unsigned short *)inBuff, 256, 0,
                          sg_is_big_endian());

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006-2017 Douglas Gilbert.
+ * Copyright (c) 2006-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <errno.h>
 #include <string.h>
 #include <getopt.h>
 #define __STDC_FORMAT_MACROS 1
@@ -19,12 +20,13 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_cmds_basic.h"
 #include "sg_cmds_extra.h"
 #include "sg_pr2serr.h"
 
-static const char * version_str = "1.09 20171010";
+static const char * version_str = "1.13 20180628";
 
 /* This program uses a ATA PASS-THROUGH SCSI command. This usage is
  * defined in the SCSI to ATA Translation (SAT) drafts and standards.
@@ -46,7 +48,7 @@ static const char * version_str = "1.09 20171010";
 
 #define SAT_ATA_PASS_THROUGH16 0x85
 #define SAT_ATA_PASS_THROUGH16_LEN 16
-#define SAT_ATA_PASS_THROUGH12 0xa1     /* clashes with MMC BLANK comand */
+#define SAT_ATA_PASS_THROUGH12 0xa1     /* clashes with MMC BLANK command */
 #define SAT_ATA_PASS_THROUGH12_LEN 12
 #define SAT_ATA_RETURN_DESC 9  /* ATA Return (sense) Descriptor */
 #define ASCQ_ATA_PT_INFO_AVAILABLE 0x1d
@@ -61,6 +63,7 @@ static const char * version_str = "1.09 20171010";
 
 static struct option long_options[] = {
         {"ck_cond", no_argument, 0, 'c'},
+        {"ck-cond", no_argument, 0, 'c'},
         {"extend", no_argument, 0, 'e'},
         {"hex", no_argument, 0, 'H'},
         {"ignore", no_argument, 0, 'i'},
@@ -140,11 +143,11 @@ find_phy_desc(int id)
 }
 
 static void
-dStrRaw(const char* str, int len)
+dStrRaw(const uint8_t * str, int len)
 {
     int k;
 
-    for (k = 0 ; k < len; ++k)
+    for (k =0; k < len; ++k)
         printf("%c", str[k]);
 }
 
@@ -170,12 +173,12 @@ do_read_log_ext(int sg_fd, int log_addr, bool page_in_log, int feature,
     int resid = 0;
     int sb_sz;
     struct sg_scsi_sense_hdr ssh;
-    unsigned char sense_buffer[64];
-    unsigned char ata_return_desc[16];
-    unsigned char apt_cdb[SAT_ATA_PASS_THROUGH16_LEN] =
+    uint8_t sense_buffer[64];
+    uint8_t ata_return_desc[16];
+    uint8_t apt_cdb[SAT_ATA_PASS_THROUGH16_LEN] =
                 {SAT_ATA_PASS_THROUGH16, 0, 0, 0, 0, 0, 0, 0,
                  0, 0, 0, 0, 0, 0, 0, 0};
-    unsigned char apt12_cdb[SAT_ATA_PASS_THROUGH12_LEN] =
+    uint8_t apt12_cdb[SAT_ATA_PASS_THROUGH12_LEN] =
                 {SAT_ATA_PASS_THROUGH12, 0, 0, 0, 0, 0, 0, 0,
                  0, 0, 0, 0};
 
@@ -347,9 +350,9 @@ do_read_log_ext(int sg_fd, int log_addr, bool page_in_log, int feature,
 
     if (ok) { /* output result if ok and --hex or --raw given */
         if (do_raw)
-            dStrRaw((const char *)resp, mx_resp_len);
+            dStrRaw((const uint8_t *)resp, mx_resp_len);
         else if (1 == do_hex)
-            dStrHex((const char *)resp, mx_resp_len, 0);
+            hex2stdout((const uint8_t *)resp, mx_resp_len, 0);
         else if (do_hex > 1)
             dWordHex((const unsigned short *)resp, mx_resp_len / 2, 0,
                      sg_is_big_endian());
@@ -360,15 +363,17 @@ do_read_log_ext(int sg_fd, int log_addr, bool page_in_log, int feature,
 
 int main(int argc, char * argv[])
 {
+    bool ck_cond = false;   /* set to true to read register(s) back */
     bool extend = false;
     bool ignore = false;
     bool raw = false;
     bool reset = false;
-    bool ck_cond = false;   /* set to true to read register(s) back */
-    int sg_fd, c, k, j, res, id, len, vendor;
+    bool verbose_given = false;
+    bool version_given = false;
+    int sg_fd, c, k, j, res, id, len, vendor, err;
     char * device_name = 0;
     char ebuff[EBUFF_SZ];
-    unsigned char inBuff[READ_LOG_EXT_RESPONSE_LEN];
+    uint8_t inBuff[READ_LOG_EXT_RESPONSE_LEN];
     int cdb_len = 16;
     int hex = 0;
     int verbose = 0;
@@ -416,11 +421,12 @@ int main(int argc, char * argv[])
             reset = true;
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr("version: %s\n", version_str);
-            exit(0);
+            version_given = true;
+            break;
         default:
             pr2serr("unrecognised option code %c [0x%x]\n", c, c);
             usage();
@@ -439,8 +445,28 @@ int main(int argc, char * argv[])
             return SG_LIB_SYNTAX_ERROR;
         }
     }
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr("version: %s\n", version_str);
+        return 0;
+    }
     if (0 == device_name) {
-        pr2serr("no DEVICE name detected\n");
+        pr2serr("no DEVICE name detected\n\n");
         usage();
         return SG_LIB_SYNTAX_ERROR;
     }
@@ -452,10 +478,11 @@ int main(int argc, char * argv[])
     }
 
     if ((sg_fd = open(device_name, O_RDWR)) < 0) {
+        err = errno;
         snprintf(ebuff, EBUFF_SZ,
                  "sg_sat_phy_event: error opening file: %s", device_name);
         perror(ebuff);
-        return SG_LIB_FILE_ERROR;
+        return sg_convert_errno(err);
     }
     ret = do_read_log_ext(sg_fd, SATA_PHY_EVENT_LPAGE,
                           false /* page_in_log */,
@@ -492,9 +519,10 @@ int main(int argc, char * argv[])
 
     res = close(sg_fd);
     if (res < 0) {
-        pr2serr("close error: %s\n", safe_strerror(-res));
+        err = errno;
+        pr2serr("close error: %s\n", safe_strerror(err));
         if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+            ret = sg_convert_errno(err);
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

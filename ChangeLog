@@ -2,27 +2,48 @@ Each utility has its own version number, date of last change and
 some description at the top of its ".c" file. All utilities in the main
 directory have their own "man" pages. There is also a sg3_utils man page.
 
-Changelog for sg3_utils-1.43 [20171104] [svn: r730]
+Changelog for sg3_utils-1.43 [20180724] [svn: r785]
+  - sg_write_x: where x can be normal, atomic, or(write),
+    same, scattered, or stream writes with 16 or 32 byte
+    cdbs (sbc4r04 for atomic, sbc4r11 for scattered)
   - sg_bg_ctl: new Background control command (sbc4r08)
-  - sg_write_atomic: new 16 and 32 byte cdbs (sbc4r04)
-    - also can issue plain WRITE(16 or 32)
-  - sg_senddiag: add --timeout=SEC option
-  - sg_sanitize: add --timeout=SEC option
-  - sg_format: add --timeout=SEC option
+  - sg_seek: new SEEK(10) or PRE-FETCH(10 or 16)
+  - sg_stream_ctl: new, STREAM CONTROL or GET STREAM STATUS
+  - sg_senddiag: add --timeout=SECS option
+  - sg_sanitize: add --timeout=SECS option
+    - add --dry-run option
+  - sg_format: add --timeout=SECS option
+    - add --dry-run option to bypass modifying behaviour
     - add --quick option to skip reconsideration time
-  - sg_decode sense: add --cdb option
+    - extend --wait timeout to 40 hours for disk sizes
+      > 4 TB and 80 hours if > 8 TB
+    - when changing block size allow for Mode Select
+      rejecting SP=1 (Save Page): repeat with SP=0
+  - sg_decode sense: add --cdb and --err=ES options
   - sg_ses: handle 2 bit EIIOE field in aes dpage
+    - increase join array size from 260 to 520 elements 
+    - add --quiet option to suppress messages
     - expand join handling of SAS connectors and others
     - expand join debug code
     - allow multiple --clear=, --get= and --set= options
-    - allow individual index ranges (e.g. --index=3,5)
+    - allow individual index ranges (e.g. --index=3-5)
     - allow --index=IIA with -ee to enumerate only fields
       belonging to element type IIA
+    - --data=@FN with --status now decodes dpage(s) in FN
     - add 'offset_temp' and 'rqst_override' to temperature
       sensor element type
+    - add 'hw_reset' and 'sw_reset' to enclosure services
+      controller electronics element type (18-047r1)
     - interpret '--join --page=aes' to only display join
       rows that have a corresponding AES dpage element
+    - support NVMe attached enclosure via NVME-MI Send and
+      Receive SES commands
+    - decode array status diagnostic page (obsolete)
     - sync to ses4r01
+  - sg_ses_microcode: add --dry-run and -ealsd options
+  - sg_ses, sg_ses_microcode, sg_senddiag: make all access
+    buffer page size aligned (typically page_size=4096)
+  - sg_write_buffer: add --dry-run option
   - sg_luns: resync with drafts (sam6r02+spc5r10)
     - remove undocumented test "W" format
     - accept and output on request "quad dashed" format
@@ -40,28 +61,61 @@ Changelog for sg3_utils-1.43 [20171104] [svn: r730]
     - fixup enumeration in power condition transition
       log page (from H. Reinecke, Suse)
   - sg_inq: fix potential unbounded loop in --export
+    - add --only to stop standard inquiry decoding also
+      doing a serial number vpd page (0x80) fetch
     - update version descriptor list to 20170114
+    - add further checks so CDROM standard inquiry response
+      doesn't trick --inhex into thinking it's VPD pg 0x80
+    - decode NVMe Identify controller/nsid commands
+    - with NVMe --only restricts to a single Identify
+      controller command
+    - add --long which decodes more of the NVMe Identify
+      command responses
   - sg_inq+sg_vpd: update Extended inquiry data vpd
     page (spc5r09)
     - block limits and block limit extension VPD pages:
       add extra info about corner cases
     - add enclosure services device characteristics
       VPD page (T10/170-142r1 --> ses4r02 ??)
-    - add --force option to bypass checking supported
-      vpd pages page and fetch requested page directly
     - add maximum inquiry|mode_page change logs fields
       to extended inquiry vpd page (spc5r17)
+    - both now return EDOM (adjusted sg error code) when
+      requested page not in Supported VPD Pages page
+    - add --force option to bypass checking Supported
+      Vpd Pages page and fetch requested page directly
   - sg_vpd: 3 party copy VPD page improvements
+    - fully implement Device constituents VPD page
     - improve handling of unknown pages
   - sg_reassign+sg_write_same: fix ULONG_MAX problem
   - sg_rdac: add sanity checks for -f=lun value
   - sg_turs+sg_requests: make both accept '--num=NUM'
     and '--number=NUM' for mutual compatibility
+  - sg_turs: add --low option
+    - fix exit status when not ready in single case
   - sg_zone: fix debug cdb naming
+    - add --sequentialize, --count=ZC options, zbc2r01b
+  - sg_reset_wp add --count=ZC option, zbc2r01b
+  - sg_persist: add --maxlen-LEN option, LEN defaults to
+    decimal, similar to --alloc-length= which takes hex
+    - add Replace lost reservation capable (RLR_C) bit
+      in Report Capabilities (spc4r36)
+  - sg_dd: add --dry-run and --verbose options
+    - allow multiple short options (e.g. -dvv )
+  - sgp_dd: pthread_cancel() has issues in C++ (and
+    the Android multi-threaded library doesn't supply it)
+    so use pthread_kill() in its place [Linux only]
+    - add --dry-run and --verbose options
+  - sgm_dd: add --dry-run and --verbose options
   - sg_opcode: add '--enumerate' and '--pdt=' options
     - support CDLP (command duration limit page)
+    - support MLU, Multiple Logical Units (18-045r1)
     - check resid and trim response if necessary
-  - sg_raw: add '--enumerate' option
+    - report when --no-inquiry is ignored
+  - sg_raw: add --enumerate option
+    - add --cmdfile=CF option, permit 64 byte NVMe
+      admin commands to be sent
+    - add --raw option (for CF in binary)
+    - page align input and output buffers
   - sg_get_lba_status: add --report-type= option (sbc4r12)
     - add support for 32 byte cdb variant (sbc4r14)
     - add support for --element-id= and --scan-len=
@@ -71,28 +125,72 @@ Changelog for sg3_utils-1.43 [20171104] [svn: r730]
     - decode completion condition (sbc4r14)
   - sg_modes: add Out of band management control mpage
   - sg_rep_zones: expand --help option information
+  - sg_unmap: add --all=ST,RN[,LA] option to unmap
+    large contiguous segments of a disk/ssd
+    - add --dry-run and --force options
+  - sg_wr_mode: add --rtd option for RTD bit
+  - sg_timestamp: add '--no-timestamp' option
+    - add --elapsed and --hex options
+  - introduce SG3_UTILS_DSENSE environment variable
   - manpages and usage messages: corrections from
     Gris Ge via github
   - group_number: is 6 bit field allowing 0 to 63,
     code in several utilities limited it to 31, fix
   - convert many two valued 'int's to bool
   - sg_lib: add SSC maintenance in/out sa names
-    - add sg_ll_inquiry_v2()
+    - enhance exit status values and associated
+      strings, add SG_LIB_OS_BASE_ERR (50)
+    - add sg_ll_inquiry_v2(), sg_ll_inquiry_pt() and
+      sg_simple_inquiry_pt()
+    - add sg_ll_report_luns_pt()
     - add sg_ll_log_sense_v2()
     - add sg_ll_mode_sense10_v2()
+    - add sg_ll_mode_select6_v2() and
+      sg_ll_mode_select10_v2() for RTD bit
     - add sg_ll_receive_diag_v2()
     - add sg_ll_write_buffer_v2()
     - add sg_get_llnum_nomult()
     - add sg_ll_get_lba_status16()
     - add sg_ll_get_lba_status32()
+    - add sg_ll_format_unit_v2()
+    - add sg_ll_test_unit_ready_progress_pt()
+    - add sg_ll_start_stop_unit_pt()
+    - add sg_ll_request_sense_pt()
+    - add sg_ll_send_diag_pt(), sg_ll_receive_diag_pt()
     - add sg_get_sfs_name() for spc5r11 (Feature sets)
     - add sg_decode_transportid_str()
     - add sg_msense_calc_length()
+    - add sg_all_zeros(), sg_all_ffs()
+    - add sg_get_sense_cmd_spec_fld()
+    - add sg_is_scsi_cdb()
+    - add sg_get_nvme_cmd_status_str()
+    - add sg_nvme_status2scsi()
+    - add sg_nvme_desc2sense()
+    - add sg_build_sense_buffer()
+    - add sg_get_nvme_opcode_name()
+    - add sg_memalign() and sg_get_page_size()
+    - add sg_is_aligned() and pr2ws()
+    - add sg_get_big_endian(), sg_set_big_endian()
+    - add hex2stdout(), hex2stderr() and hex2str()
+    - add sg_convert_errno()
+    - add sg_if_can2stdout(), sg_if_can2stderr() and
+      sg_exit2str()
     - implement 'format' argument in dStrHexStr()
     - add read buffer(16) command mode names
     - add Microcode activation sense descriptor spc5r10
+    - add SG_LIB_OK_TRUE(0) and SG_LIB_OK_FALSE(36)
+      non "error" code defines for exit status
+    - add SG_LIB_LBA_OUT_OF_RANGE error code
     - add SG_LIB_UNBOUNDED_32BIT (_16BIT and _64BIT)
       defines to help with decoding corner cases
+    - identify vendor specific sense data (response
+      code 0x7f), print contents in hex
+  - sg_pr2serr.h: add sg_scnpr() [like lk scnprintf()]
+  - sg_pt: add construct_scsi_pt_obj_with_fd()
+    - add pt_device_is_nvme(), get_pt_nvme_nsid()
+    - add check_pt_file_handle()
+    - add get_pt_file_handle(), set_pt_file_handle()
+    - add small SNTL to support sg_ses on NVMe
   - sg_lib_data: sync asc/ascq codes with T10 20170114
     - add write scattered (16+32) cdb names sbc4r11
   - sg_cmds_extra: expand sg_ll_ata_pt() to send new
@@ -100,21 +198,37 @@ Changelog for sg3_utils-1.43 [20171104] [svn: r730]
   - sg_sat_identify: expand to take --len=32
   - sg_pt: add dummy pt_device_is_nvme()
   - rescan-scsi-bus.sh: harden code
-    - fixes from Suse; bump version to: 20160511
+    - fixes from Suse; bump version
+    - bump version to 20180615
     - add to install list in Makefile, hope it does
       not clash with other package providing it
+    - add --ignore-rev to ignore revision change
   - 55-scsi-sg3_id.rules: fixes from Suse
-  - https://github.com/hreinecke/sg3_utils
-    branch sles15 synced 20170914
+  - https://github.com/hreinecke/sg3_utils branch
+    sles15 synced 20170914
   - move some testing utilities out of the
-    'examples' and 'utils' directory into the new
+    'examples' and 'utils' directories into the new
     'testing' directory
-    directory into the 'testing' directory
+  - add testing/sg_tst_nvme utility
+  - clean Makefile.freebsd in examples/ and testing/
   - gcc 7.2 cleanups (sysmacros.h etc)
   - clang --analyze static checker clean ups
   - shellcheck cleanup on scripts
+  - ./configure automake utility:
+    - option --enable-debug added for testing
+    - option --disable-linuxbsg retired, still accepted
+      but now ignored, Linux sg v3 or v4 interface
+      decision made at runtime
+    - Info section now printed at end of ./configure
   - automake: add AM_PROG_AR to configure.ac
     - upgrade to version 1.15
+    - various configure.ac and Makefile.am cleanups
+    - add SG_LIB_ANDROID build 'define'. If defined then
+      SG_LIB_LINUX is also defined, so test for Android
+      before Linux if need to differentiate
+  - update BSD license from 3 to 2 clause aka FreeBSD
+    license (without reference to FreeBSD project)
+  - debian: bump compat file contents from 7 to 10
 
 Changelog for sg3_utils-1.42 [20160217] [svn: r663]
   - sg_timestamp: new, to report or set timestamp
@@ -162,6 +276,7 @@ Changelog for sg3_utils-1.42 [20160217] [svn: r663]
   - sg_io_linux, sg_pt_linux: drop SUGGEST_* decoding
   - sg_unaligned.h: add 48 bit support and gets for
     variable length unsigned integers
+    - add specializations for little and big endian
   - change sg_ll_*() function's 'int noisy' to bool
 
 Changelog for sg3_utils-1.41 [20150511] [svn: r644]
@@ -599,7 +714,7 @@ Changelog for sg3_utils-1.28 [20091002] [svn: r315]
   - sg_persist: add transport specific transportID format
     - allow transportIDs to be read from named file
   - sg_opcodes: allow --opcode= option to take OP and SA
-    values (comma seperated)
+    values (comma separated)
     - tweak print format, remove test code
   - sg_requests: remove test code in progress calculation
   - sg_reset: add target reset option
@@ -1421,7 +1536,7 @@ Changelog for sg3_utils-0.95 [20010915]
 Changelog for sg3_utils-0.94 [20010419]
 ----------------------------
   - add sg_start, documented in README.sg_start [Kurt Garloff]
-  - add osst suport in sg_map [Kurt Garloff]
+  - add osst support in sg_map [Kurt Garloff]
   - improvements to sginfo [Kurt Garloff]
 
 Changelog for sg3_utils-0.93 [20010415]

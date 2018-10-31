@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2017 Hannes Reinecke and Douglas Gilbert.
+ * Copyright (c) 2004-2018 Hannes Reinecke and Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
 #include <ctype.h>
 #include <getopt.h>
@@ -18,6 +19,7 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_cmds_basic.h"
 #include "sg_cmds_extra.h"
@@ -30,7 +32,7 @@
  *  to the 'SCSI Accessed Fault-Tolerant Enclosures' (SAF-TE) spec.
  */
 
-static const char * version_str = "0.28 20171006";
+static const char * version_str = "0.33 20180628";
 
 
 #define SENSE_BUFF_LEN 64       /* Arbitrary, could be larger */
@@ -61,17 +63,17 @@ struct safte_cfg_t safte_cfg;
 static unsigned int buf_capacity = 64;
 
 static void
-dStrRaw(const char* str, int len)
+dStrRaw(const uint8_t * str, int len)
 {
     int k;
 
-    for (k = 0 ; k < len; ++k)
+    for (k = 0; k < len; ++k)
         printf("%c", str[k]);
 }
 
 /* Buffer ID 0x0: Read Enclosure Configuration (mandatory) */
 static int
-read_safte_configuration(int sg_fd, unsigned char *rb_buff,
+read_safte_configuration(int sg_fd, uint8_t *rb_buff,
                          unsigned int rb_len, int verbose)
 {
     int res;
@@ -127,11 +129,11 @@ do_safte_encl_status(int sg_fd, int do_hex, int do_raw, int verbose)
 {
     int res, i, offset;
     unsigned int rb_len;
-    unsigned char *rb_buff;
+    uint8_t *rb_buff;
 
     rb_len = safte_cfg.fans + safte_cfg.psupplies + safte_cfg.slots +
         safte_cfg.temps + 5 + safte_cfg.vendor_specific;
-    rb_buff = (unsigned char *)malloc(rb_len);
+    rb_buff = (uint8_t *)malloc(rb_len);
 
 
     if (verbose > 1)
@@ -143,11 +145,11 @@ do_safte_encl_status(int sg_fd, int do_hex, int do_raw, int verbose)
         return res;
 
     if (do_raw > 1) {
-        dStrRaw((const char *)rb_buff, buf_capacity);
+        dStrRaw(rb_buff, buf_capacity);
         return 0;
     }
     if (do_hex > 1) {
-        dStrHex((const char *)rb_buff, buf_capacity, 1);
+        hex2stdout(rb_buff, buf_capacity, 1);
         return 0;
     }
     printf("Enclosure Status:\n");
@@ -269,11 +271,11 @@ do_safte_usage_statistics(int sg_fd, int do_hex, int do_raw, int verbose)
 {
     int res;
     unsigned int rb_len;
-    unsigned char *rb_buff;
+    uint8_t *rb_buff;
     unsigned int minutes;
 
     rb_len = 16 + safte_cfg.vendor_specific;
-    rb_buff = (unsigned char *)malloc(rb_len);
+    rb_buff = (uint8_t *)malloc(rb_len);
 
     if (verbose > 1)
         pr2serr("Use READ BUFFER,mode=vendor_specific,buff_id=2 to read "
@@ -292,11 +294,11 @@ do_safte_usage_statistics(int sg_fd, int do_hex, int do_raw, int verbose)
     }
 
     if (do_raw > 1) {
-        dStrRaw((const char *)rb_buff, buf_capacity);
+        dStrRaw(rb_buff, buf_capacity);
         return 0;
     }
     if (do_hex > 1) {
-        dStrHex((const char *)rb_buff, buf_capacity, 1);
+        hex2stdout(rb_buff, buf_capacity, 1);
         return 0;
     }
     printf("Usage Statistics:\n");
@@ -315,10 +317,10 @@ do_safte_slot_insertions(int sg_fd, int do_hex, int do_raw, int verbose)
 {
     int res, i;
     unsigned int rb_len;
-    unsigned char *rb_buff, slot_status;
+    uint8_t *rb_buff, slot_status;
 
     rb_len = safte_cfg.slots * 2;
-    rb_buff = (unsigned char *)malloc(rb_len);
+    rb_buff = (uint8_t *)malloc(rb_len);
 
     if (verbose > 1)
         pr2serr("Use READ BUFFER,mode=vendor_specific,buff_id=3 to read "
@@ -337,11 +339,11 @@ do_safte_slot_insertions(int sg_fd, int do_hex, int do_raw, int verbose)
     }
 
     if (do_raw > 1) {
-        dStrRaw((const char *)rb_buff, buf_capacity);
+        dStrRaw(rb_buff, buf_capacity);
         return 0;
     }
     if (do_hex > 1) {
-        dStrHex((const char *)rb_buff, buf_capacity, 1);
+        hex2stdout(rb_buff, buf_capacity, 1);
         return 0;
     }
     printf("Slot insertions:\n");
@@ -359,10 +361,10 @@ do_safte_slot_status(int sg_fd, int do_hex, int do_raw, int verbose)
 {
     int res, i;
     unsigned int rb_len;
-    unsigned char *rb_buff, slot_status;
+    uint8_t *rb_buff, slot_status;
 
     rb_len = safte_cfg.slots * 4;
-    rb_buff = (unsigned char *)malloc(rb_len);
+    rb_buff = (uint8_t *)malloc(rb_len);
 
     if (verbose > 1)
         pr2serr("Use READ BUFFER,mode=vendor_specific,buff_id=4 to read "
@@ -375,11 +377,11 @@ do_safte_slot_status(int sg_fd, int do_hex, int do_raw, int verbose)
     }
 
     if (do_raw > 1) {
-        dStrRaw((const char *)rb_buff, buf_capacity);
+        dStrRaw(rb_buff, buf_capacity);
         return 0;
     }
     if (do_hex > 1) {
-        dStrHex((const char *)rb_buff, buf_capacity, 1);
+        hex2stdout(rb_buff, buf_capacity, 1);
         return 0;
     }
     printf("Slot status:\n");
@@ -408,10 +410,10 @@ do_safte_global_flags(int sg_fd, int do_hex, int do_raw, int verbose)
 {
     int res;
     unsigned int rb_len;
-    unsigned char *rb_buff;
+    uint8_t *rb_buff;
 
     rb_len = 16;
-    rb_buff = (unsigned char *)malloc(rb_len);
+    rb_buff = (uint8_t *)malloc(rb_len);
 
     if (verbose > 1)
         pr2serr("Use READ BUFFER,mode=vendor_specific,buff_id=5 to read "
@@ -430,11 +432,11 @@ do_safte_global_flags(int sg_fd, int do_hex, int do_raw, int verbose)
     }
 
     if (do_raw > 1) {
-        dStrRaw((const char *)rb_buff, buf_capacity);
+        dStrRaw(rb_buff, buf_capacity);
         return 0;
     }
     if (do_hex > 1) {
-        dStrHex((const char *)rb_buff, buf_capacity, 1);
+        hex2stdout(rb_buff, buf_capacity, 1);
         return 0;
     }
     printf("Global Flags:\n");
@@ -467,8 +469,8 @@ do_safte_global_flags(int sg_fd, int do_hex, int do_raw, int verbose)
     return 0;
 }
 
-static
-void usage()
+static void
+usage()
 {
     pr2serr("Usage:  sg_safte [--config] [--devstatus] [--encstatus] "
             "[--flags] [--help]\n"
@@ -512,11 +514,14 @@ main(int argc, char * argv[])
 {
     bool do_insertions = false;
     bool no_hex_raw;
-    int sg_fd, c, ret, peri_type;
+    bool verbose_given = false;
+    bool version_given = false;
+    int c, ret, peri_type;
+    int sg_fd = -1;
     int res = SG_LIB_CAT_OTHER;
     const char * device_name = NULL;
     char ebuff[EBUFF_SZ];
-    unsigned char *rb_buff;
+    uint8_t *rb_buff;
     bool do_config = false;
     bool do_status = false;
     bool do_slots = false;
@@ -570,11 +575,12 @@ main(int argc, char * argv[])
                 do_usage = true;
                 break;
             case 'v':
+                verbose_given = true;
                 ++verbose;
                 break;
             case 'V':
-                pr2serr("Version string: %s\n", version_str);
-                exit(0);
+                version_given = true;
+                break;
             default:
                 pr2serr("unrecognised option code 0x%x ??\n", c);
                 usage();
@@ -594,8 +600,29 @@ main(int argc, char * argv[])
         }
     }
 
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr("Version string: %s\n", version_str);
+        return 0;
+    }
+
     if (NULL == device_name) {
-        pr2serr("missing device name!\n");
+        pr2serr("Missing device name!\n\n");
         usage();
         return SG_LIB_SYNTAX_ERROR;
     }
@@ -608,15 +635,18 @@ main(int argc, char * argv[])
 
     if ((sg_fd = sg_cmds_open_device(device_name, false /* rw */, verbose))
         < 0) {
-        snprintf(ebuff, EBUFF_SZ, "sg_safte: error opening file: %s (rw)",
-                 device_name);
-        perror(ebuff);
-        return SG_LIB_FILE_ERROR;
+        if (verbose) {
+            snprintf(ebuff, EBUFF_SZ, "sg_safte: error opening file: %s (rw)",
+                     device_name);
+            perror(ebuff);
+        }
+        ret = sg_convert_errno(-sg_fd);
+        goto fini;
     }
     no_hex_raw = ((0 == do_hex) && (0 == do_raw));
 
     if (no_hex_raw) {
-        if (0 == sg_simple_inquiry(sg_fd, &inq_resp, 1, verbose)) {
+        if (0 == sg_simple_inquiry(sg_fd, &inq_resp, true, verbose)) {
             printf("  %.8s  %.16s  %.4s\n", inq_resp.vendor,
                    inq_resp.product, inq_resp.revision);
             peri_type = inq_resp.peripheral_type;
@@ -632,7 +662,7 @@ main(int argc, char * argv[])
         }
     }
 
-    rb_buff = (unsigned char *)malloc(buf_capacity);
+    rb_buff = (uint8_t *)malloc(buf_capacity);
     if (!rb_buff)
         goto err_out;
 
@@ -647,11 +677,11 @@ main(int argc, char * argv[])
         goto err_out;
     }
     if (1 == do_raw) {
-        dStrRaw((const char *)rb_buff, buf_capacity);
+        dStrRaw(rb_buff, buf_capacity);
         goto finish;
     }
     if (1 == do_hex) {
-        dStrHex((const char *)rb_buff, buf_capacity, 1);
+        hex2stdout(rb_buff, buf_capacity, 1);
         goto finish;
     }
 
@@ -726,11 +756,19 @@ err_out:
         break;
     }
     ret = res;
-    res = sg_cmds_close_device(sg_fd);
-    if (res < 0) {
-        pr2serr("close error: %s\n", safe_strerror(-res));
-        if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+fini:
+    if (sg_fd >= 0) {
+        res = sg_cmds_close_device(sg_fd);
+        if (res < 0) {
+            pr2serr("close error: %s\n", safe_strerror(-res));
+            if (0 == ret)
+                ret = sg_convert_errno(-res);
+        }
+    }
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_safte failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

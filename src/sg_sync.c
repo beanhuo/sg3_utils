@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2017 Douglas Gilbert.
+ * Copyright (c) 2004-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -14,6 +14,12 @@
 #include <string.h>
 #include <limits.h>
 #include <getopt.h>
+#define __STDC_FORMAT_MACROS 1
+#include <inttypes.h>
+
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
 #include "sg_lib.h"
 #include "sg_cmds_basic.h"
@@ -29,7 +35,7 @@
  * (e.g. disks).
  */
 
-static const char * version_str = "1.18 20171103";
+static const char * version_str = "1.23 20180628";
 
 #define SYNCHRONIZE_CACHE16_CMD     0x91
 #define SYNCHRONIZE_CACHE16_CMDLEN  16
@@ -55,7 +61,7 @@ static void usage()
 {
     pr2serr("Usage: sg_sync    [--16] [--count=COUNT] [--group=GN] [--help] "
             "[--immed]\n"
-            "                  [--lba=LBA] [--sync-nv] [--timeout=SEC] "
+            "                  [--lba=LBA] [--sync-nv] [--timeout=SECS] "
             "[--verbose]\n"
             "                  [--version] DEVICE\n"
             "  where:\n"
@@ -76,7 +82,7 @@ static void usage()
             "    --sync-nv|-s        synchronize to non-volatile storage "
             "(if distinct\n"
             "                        from medium). Obsolete in sbc3r35d.\n"
-            "    --timeout=SEC|-t SEC    command timeout in seconds, only "
+            "    --timeout=SECS|-t SECS    command timeout in seconds, only "
             "active\n"
             "                              if '--16' given (def: 60 seconds)\n"
             "    --verbose|-v        increase verbosity\n"
@@ -90,10 +96,10 @@ sg_ll_sync_cache_16(int sg_fd, bool sync_nv, bool immed, int group,
                     bool noisy, int verbose)
 {
     int res, ret, k, sense_cat;
-    unsigned char sc_cdb[SYNCHRONIZE_CACHE16_CMDLEN] =
+    uint8_t sc_cdb[SYNCHRONIZE_CACHE16_CMDLEN] =
                 {SYNCHRONIZE_CACHE16_CMD, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                  0, 0, 0, 0, 0, 0};
-    unsigned char sense_b[SENSE_BUFF_LEN];
+    uint8_t sense_b[SENSE_BUFF_LEN];
     struct sg_pt_base * ptvp;
 
     if (sync_nv)
@@ -122,7 +128,7 @@ sg_ll_sync_cache_16(int sg_fd, bool sync_nv, bool immed, int group,
                                SG_NO_DATA_IN, sense_b, noisy, verbose,
                                &sense_cat);
     if (-1 == ret)
-        ;
+        ret = sg_convert_errno(get_scsi_pt_os_err(ptvp));
     else if (-2 == ret) {
         switch (sense_cat) {
         case SG_LIB_CAT_RECOVERED:
@@ -146,7 +152,10 @@ int main(int argc, char * argv[])
     bool do_16 = false;
     bool immed = false;
     bool sync_nv = false;
-    int sg_fd, res, c;
+    bool verbose_given = false;
+    bool version_given = false;
+    int res, c;
+    int sg_fd = -1;
     int group = 0;
     int ret = 0;
     int to_secs = DEF_PT_TIMEOUT;
@@ -208,11 +217,12 @@ int main(int argc, char * argv[])
             }
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr("version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
             usage();
@@ -232,16 +242,39 @@ int main(int argc, char * argv[])
         }
     }
 
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr("version: %s\n", version_str);
+        return 0;
+    }
+
     if (NULL == device_name) {
-        pr2serr("missing device name!\n");
+        pr2serr("Missing device name!\n\n");
         usage();
         return SG_LIB_SYNTAX_ERROR;
     }
     sg_fd = sg_cmds_open_device(device_name, false /* rw */, verbose);
     if (sg_fd < 0) {
-        pr2serr("open error: %s: %s\n", device_name,
-                safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        if (verbose)
+            pr2serr("open error: %s: %s\n", device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
+        goto fini;
     }
 
     if (do_16)
@@ -258,11 +291,19 @@ int main(int argc, char * argv[])
         pr2serr("Synchronize cache failed: %s\n", b);
     }
 
-    res = sg_cmds_close_device(sg_fd);
-    if (res < 0) {
-        pr2serr("close error: %s\n", safe_strerror(-res));
-        if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+fini:
+    if (sg_fd >= 0) {
+        res = sg_cmds_close_device(sg_fd);
+        if (res < 0) {
+            pr2serr("close error: %s\n", safe_strerror(-res));
+            if (0 == ret)
+                ret = sg_convert_errno(-res);
+        }
+    }
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_sync failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2017 Douglas Gilbert.
+ * Copyright (c) 2004-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -31,7 +31,7 @@
 
 */
 
-static const char * version_str = "0.44 20171008";    /* mmc6r02 */
+static const char * version_str = "0.49 20180626";    /* mmc6r02 */
 
 #define MX_ALLOC_LEN 8192
 #define NAME_BUFF_SZ 64
@@ -39,7 +39,7 @@ static const char * version_str = "0.44 20171008";    /* mmc6r02 */
 #define ME "sg_get_config: "
 
 
-static unsigned char resp_buffer[MX_ALLOC_LEN];
+static uint8_t resp_buffer[MX_ALLOC_LEN];
 
 static struct option long_options[] = {
         {"brief", no_argument, 0, 'b'},
@@ -222,7 +222,7 @@ get_feature_str(int feature_num, char * buff)
 {
     int k, num;
 
-    num = sizeof(feature_desc_arr) / sizeof(feature_desc_arr[0]);
+    num = SG_ARRAY_SIZE(feature_desc_arr);
     for (k = 0; k < num; ++k) {
         if (feature_desc_arr[k].val == feature_num) {
             strcpy(buff, feature_desc_arr[k].desc);
@@ -238,12 +238,12 @@ dStrRaw(const char * str, int len)
 {
     int k;
 
-    for (k = 0 ; k < len; ++k)
+    for (k = 0; k < len; ++k)
         printf("%c", str[k]);
 }
 
 static void
-decode_feature(int feature, unsigned char * bp, int len)
+decode_feature(int feature, uint8_t * bp, int len)
 {
     int k, num, n, profile;
     char buff[128];
@@ -876,17 +876,17 @@ decode_feature(int feature, unsigned char * bp, int len)
         pr2serr("    Unknown feature [0x%x], version=%d persist=%d, "
                 "current=%d\n", feature, ((bp[2] >> 2) & 0xf),
                 !!(bp[2] & 0x2), !!(bp[2] & 0x1));
-        dStrHexErr((const char *)bp, len, 1);
+        hex2stderr(bp, len, 1);
         break;
     }
 }
 
 static void
-decode_config(unsigned char * resp, int max_resp_len, int len, bool brief,
+decode_config(uint8_t * resp, int max_resp_len, int len, bool brief,
               bool inner_hex)
 {
     int k, curr_profile, extra_len, feature;
-    unsigned char * bp;
+    uint8_t * bp;
     char buff[128];
 
     if (max_resp_len < len) {
@@ -913,7 +913,7 @@ decode_config(unsigned char * resp, int max_resp_len, int len, bool brief,
         if (brief)
             continue;
         if (inner_hex) {
-            dStrHex((const char *)bp, extra_len, 1);
+            hex2stdout(bp, extra_len, 1);
             continue;
         }
         if (0 != (extra_len % 4))
@@ -929,14 +929,14 @@ list_known(bool brief)
 {
     int k, num;
 
-    num = sizeof(feature_desc_arr) / sizeof(feature_desc_arr[0]);
+    num = SG_ARRAY_SIZE(feature_desc_arr);
     printf("Known features:\n");
     for (k = 0; k < num; ++k)
         printf("  %s [0x%x]\n", feature_desc_arr[k].desc,
                feature_desc_arr[k].val);
     if (! brief) {
         printf("Known profiles:\n");
-        num = sizeof(profile_desc_arr) / sizeof(profile_desc_arr[0]);
+        num = SG_ARRAY_SIZE(profile_desc_arr);
         for (k = 0; k < num; ++k)
             printf("  %s [0x%x]\n", profile_desc_arr[k].desc,
                    profile_desc_arr[k].val);
@@ -947,17 +947,19 @@ list_known(bool brief)
 int
 main(int argc, char * argv[])
 {
+    bool brief = false;
+    bool inner_hex = false;
+    bool list = false;
+    bool do_raw = false;
+    bool readonly = false;
+    bool verbose_given = false;
+    bool version_given = false;
     int sg_fd, res, c, len;
     int peri_type = 0;
     int rt = 0;
     int starting = 0;
     int verbose = 0;
-    bool brief = false;
     int do_hex = 0;
-    bool inner_hex = false;
-    bool list = false;
-    bool do_raw = false;
-    bool readonly = false;
     const char * device_name = NULL;
     char buff[64];
     const char * cp;
@@ -1013,11 +1015,12 @@ main(int argc, char * argv[])
             }
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr(ME "version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
             usage();
@@ -1036,6 +1039,26 @@ main(int argc, char * argv[])
             return SG_LIB_SYNTAX_ERROR;
         }
     }
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr(ME "version: %s\n", version_str);
+        return 0;
+    }
 
     if (list) {
         list_known(brief);
@@ -1050,9 +1073,9 @@ main(int argc, char * argv[])
         < 0) {
         pr2serr(ME "error opening file: %s (ro): %s\n", device_name,
                 safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        return sg_convert_errno(-sg_fd);
     }
-    if (0 == sg_simple_inquiry(sg_fd, &inq_resp, 1, verbose)) {
+    if (0 == sg_simple_inquiry(sg_fd, &inq_resp, true, verbose)) {
         if (! do_raw)
             printf("  %.8s  %.16s  %.4s\n", inq_resp.vendor, inq_resp.product,
                    inq_resp.revision);
@@ -1073,7 +1096,7 @@ main(int argc, char * argv[])
     sg_fd = sg_cmds_open_device(device_name, readonly, verbose);
     if (sg_fd < 0) {
         pr2serr(ME "open error (rw): %s\n", safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        return sg_convert_errno(-sg_fd);
     }
     if (do_raw) {
         if (sg_set_binary_mode(STDOUT_FILENO) < 0) {
@@ -1090,7 +1113,7 @@ main(int argc, char * argv[])
         if (do_hex) {
             if (len > (int)sizeof(resp_buffer))
                 len = sizeof(resp_buffer);
-            dStrHex((const char *)resp_buffer, len, 0);
+            hex2stdout(resp_buffer, len, 0);
         } else if (do_raw)
             dStrRaw((const char *)resp_buffer, len);
         else
@@ -1109,7 +1132,12 @@ main(int argc, char * argv[])
     if (res < 0) {
         pr2serr("close error: %s\n", safe_strerror(-res));
         if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+            ret = sg_convert_errno(-ret);
+    }
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_get_config failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' or '-vv' for "
+                    "more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

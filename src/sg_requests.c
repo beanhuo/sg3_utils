@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2017 Douglas Gilbert.
+ * Copyright (c) 2004-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -18,6 +18,7 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_cmds_basic.h"
 #include "sg_pr2serr.h"
@@ -28,7 +29,7 @@
  * This program issues the SCSI command REQUEST SENSE to the given SCSI device.
  */
 
-static const char * version_str = "1.29 20171008";
+static const char * version_str = "1.32 20180628";
 
 #define MAX_REQS_RESP_LEN 255
 #define DEF_REQS_RESP_LEN 252
@@ -98,23 +99,26 @@ usage()
 }
 
 static void
-dStrRaw(const char* str, int len)
+dStrRaw(const uint8_t * str, int len)
 {
     int k;
 
-    for (k = 0 ; k < len; ++k)
+    for (k = 0; k < len; ++k)
         printf("%c", str[k]);
 }
 
 int
 main(int argc, char * argv[])
 {
-    int sg_fd, res, c, resp_len, k, progress;
-    unsigned char requestSenseBuff[MAX_REQS_RESP_LEN + 1];
+    int res, c, resp_len, k, progress;
+    int sg_fd = -1;
+    uint8_t requestSenseBuff[MAX_REQS_RESP_LEN + 1];
     bool desc = false;
     bool do_progress = false;
     bool do_raw = false;
     bool do_status = false;
+    bool verbose_given = false;
+    bool version_given = false;
     int num_rs = 1;
     int do_hex = 0;
     int maxlen = 0;
@@ -176,11 +180,12 @@ main(int argc, char * argv[])
 #endif
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr(ME "version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
             usage();
@@ -199,11 +204,31 @@ main(int argc, char * argv[])
             return SG_LIB_SYNTAX_ERROR;
         }
     }
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr(ME "version: %s\n", version_str);
+        return 0;
+    }
 
     if (0 == maxlen)
         maxlen = DEF_REQS_RESP_LEN;
     if (NULL == device_name) {
-        pr2serr("missing device name!\n");
+        pr2serr("Missing device name!\n\n");
         usage();
         return SG_LIB_SYNTAX_ERROR;
     }
@@ -216,8 +241,11 @@ main(int argc, char * argv[])
 
     sg_fd = sg_cmds_open_device(device_name, true /* ro */, verbose);
     if (sg_fd < 0) {
-        pr2serr(ME "open error: %s: %s\n", device_name, safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        if (verbose)
+            pr2serr(ME "open error: %s: %s\n", device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
+        goto finish;
     }
     if (do_progress) {
         for (k = 0; k < num_rs; ++k) {
@@ -244,7 +272,7 @@ main(int argc, char * argv[])
             resp_len = requestSenseBuff[7] + 8;
             if (verbose > 1) {
                 pr2serr("Parameter data in hex\n");
-                dStrHexErr((const char *)requestSenseBuff, resp_len, 1);
+                hex2stderr(requestSenseBuff, resp_len, 1);
             }
             progress = -1;
             sg_get_sense_progress_fld(requestSenseBuff, resp_len,
@@ -282,15 +310,15 @@ main(int argc, char * argv[])
         if (0 == res) {
             resp_len = requestSenseBuff[7] + 8;
             if (do_raw)
-                dStrRaw((const char *)requestSenseBuff, resp_len);
+                dStrRaw(requestSenseBuff, resp_len);
             else if (do_hex)
-                dStrHex((const char *)requestSenseBuff, resp_len, 1);
+                hex2stdout(requestSenseBuff, resp_len, 1);
             else if (1 == num_rs) {
                 pr2serr("Decode parameter data as sense data:\n");
                 sg_print_sense(NULL, requestSenseBuff, resp_len, 0);
                 if (verbose > 1) {
                     pr2serr("\nParameter data in hex\n");
-                    dStrHexErr((const char *)requestSenseBuff, resp_len, 1);
+                    hex2stderr(requestSenseBuff, resp_len, 1);
                 }
             }
             continue;
@@ -321,7 +349,7 @@ main(int argc, char * argv[])
 #ifndef SG_LIB_MINGW
     if (do_time && (start_tm.tv_sec || start_tm.tv_usec)) {
         struct timeval res_tm;
-        double a, b;
+        double den, num;
 
         gettimeofday(&end_tm, NULL);
         res_tm.tv_sec = end_tm.tv_sec - start_tm.tv_sec;
@@ -330,24 +358,31 @@ main(int argc, char * argv[])
             --res_tm.tv_sec;
             res_tm.tv_usec += 1000000;
         }
-        a = res_tm.tv_sec;
-        a += (0.000001 * res_tm.tv_usec);
-        b = (double)num_rs;
+        den = res_tm.tv_sec;
+        den += (0.000001 * res_tm.tv_usec);
+        num = (double)num_rs;
         printf("time to perform commands was %d.%06d secs",
                (int)res_tm.tv_sec, (int)res_tm.tv_usec);
-        if (a > 0.00001)
-            printf("; %.2f operations/sec\n", b / a);
+        if (den > 0.00001)
+            printf("; %.2f operations/sec\n", num / den);
         else
             printf("\n");
     }
 #endif
 
 finish:
-    res = sg_cmds_close_device(sg_fd);
-    if (res < 0) {
-        pr2serr("close error: %s\n", safe_strerror(-res));
-        if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+    if (sg_fd >= 0) {
+        res = sg_cmds_close_device(sg_fd);
+        if (res < 0) {
+            pr2serr("close error: %s\n", safe_strerror(-res));
+            if (0 == ret)
+                ret = sg_convert_errno(-res);
+        }
+    }
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_requests failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

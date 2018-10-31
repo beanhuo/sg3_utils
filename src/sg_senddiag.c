@@ -1,5 +1,5 @@
 /* A utility program originally written for the Linux OS SCSI subsystem
-*  Copyright (C) 2003-2017 D. Gilbert
+*  Copyright (C) 2003-2018 D. Gilbert
 *  This program is free software; you can redistribute it and/or modify
 *  it under the terms of the GNU General Public License as published by
 *  the Free Software Foundation; either version 2, or (at your option)
@@ -20,15 +20,18 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_cmds_basic.h"
 #include "sg_cmds_extra.h"
+#if SG_LIB_WIN32
 #include "sg_pt.h"      /* needed for scsi_pt_win32_direct() */
+#endif
 #include "sg_unaligned.h"
 #include "sg_pr2serr.h"
 
 
-static const char * version_str = "0.54 20171030";
+static const char * version_str = "0.63 20180628";
 
 #define ME "sg_senddiag: "
 
@@ -63,15 +66,16 @@ struct opts_t {
     bool do_pf;
     bool do_raw;
     bool do_uoff;
-    bool do_version;
     bool opt_new;
+    bool verbose_given;
+    bool version_given;
     int do_help;
     int do_hex;
     int maxlen;
     int page_code;
     int do_selftest;
     int timeout;
-    int do_verbose;
+    int verbose;
     const char * device_name;
     const char * raw_arg;
 };
@@ -84,7 +88,7 @@ usage()
            "[--list]\n"
            "                   [--maxlen=LEN] [--page=PG] [--pf] "
            "[--raw=H,H...]\n"
-           "                   [--selftest=ST] [--test] [--timeout=SEC] "
+           "                   [--selftest=ST] [--test] [--timeout=SECS] "
            "[--uoff]\n"
            "                   [--verbose] [--version] [DEVICE]\n"
            "  where:\n"
@@ -114,7 +118,7 @@ usage()
            "                           5->foreground short, 6->foreground "
            "extended\n"
            "    --test|-t       default self-test\n"
-           "    --timeout=SEC|-T SEC    timeout for foreground self tests\n"
+           "    --timeout=SECS|-T SECS    timeout for foreground self tests\n"
            "                            unit: second (def: 7200 seconds)\n"
            "    --uoff|-u       unit offline (def: 0, only with '--test')\n"
            "    --verbose|-v    increase verbosity\n"
@@ -130,7 +134,7 @@ usage_old()
 {
     printf("Usage: sg_senddiag [-doff] [-e] [-h] [-H] [-l] [-pf]"
            " [-raw=H,H...]\n"
-           "                   [-s=SF] [-t] [-T=SEC] [-uoff] [-v] [-V] "
+           "                   [-s=SF] [-t] [-T=SECS] [-uoff] [-v] [-V] "
            "[DEVICE]\n"
            "  where:\n"
            "    -doff   device online (def: 0, only with '-t')\n"
@@ -148,7 +152,7 @@ usage_old()
            " 4->abort test\n"
            "            5->foreground short, 6->foreground extended\n"
            "    -t      default self-test\n"
-           "    -T SEC    timeout for foreground self tests\n"
+           "    -T SECS    timeout for foreground self tests\n"
            "    -uoff   unit offline (def: 0, only with '-t')\n"
            "    -v      increase verbosity (print issued SCSI cmds)\n"
            "    -V      output version string\n"
@@ -160,7 +164,7 @@ usage_old()
 }
 
 static int
-process_cl_new(struct opts_t * op, int argc, char * argv[])
+new_parse_cmd_line(struct opts_t * op, int argc, char * argv[])
 {
     int c, n;
 
@@ -234,7 +238,7 @@ process_cl_new(struct opts_t * op, int argc, char * argv[])
         case 'T':
             n = sg_get_num(optarg);
             if (n < 0) {
-                pr2serr("bad argument to '--timeout=SEC'\n");
+                pr2serr("bad argument to '--timeout=SECS'\n");
                 return SG_LIB_SYNTAX_ERROR;
             }
             op->timeout = n;
@@ -243,10 +247,11 @@ process_cl_new(struct opts_t * op, int argc, char * argv[])
             op->do_uoff = true;
             break;
         case 'v':
-            ++op->do_verbose;
+            op->verbose_given = true;
+            ++op->verbose;
             break;
         case 'V':
-            op->do_version = true;
+            op->version_given = true;
             break;
         default:
             pr2serr("unrecognised option code %c [0x%x]\n", c, c);
@@ -272,7 +277,7 @@ process_cl_new(struct opts_t * op, int argc, char * argv[])
 }
 
 static int
-process_cl_old(struct opts_t * op, int argc, char * argv[])
+old_parse_cmd_line(struct opts_t * op, int argc, char * argv[])
 {
     bool jmp_out;
     int k, plen, num, n;
@@ -330,10 +335,11 @@ process_cl_old(struct opts_t * op, int argc, char * argv[])
                         jmp_out = true;
                     break;
                 case 'v':
-                    ++op->do_verbose;
+                    op->verbose_given = true;
+                    ++op->verbose;
                     break;
                 case 'V':
-                    op->do_version = true;
+                    op->version_given = true;
                     break;
                 case '?':
                     ++op->do_help;
@@ -361,7 +367,7 @@ process_cl_old(struct opts_t * op, int argc, char * argv[])
             } else if (0 == strncmp("T=", cp, 2)) {
                 num = sscanf(cp + 2, "%d", &n);
                 if ((1 != num) || (n < 0)) {
-                    printf("Bad page code after '-T=SEC' option\n");
+                    printf("Bad page code after '-T=SECS' option\n");
                     usage_old();
                     return SG_LIB_SYNTAX_ERROR;
                 }
@@ -386,7 +392,7 @@ process_cl_old(struct opts_t * op, int argc, char * argv[])
 }
 
 static int
-process_cl(struct opts_t * op, int argc, char * argv[])
+parse_cmd_line(struct opts_t * op, int argc, char * argv[])
 {
     int res;
     char * cp;
@@ -394,14 +400,14 @@ process_cl(struct opts_t * op, int argc, char * argv[])
     cp = getenv("SG3_UTILS_OLD_OPTS");
     if (cp) {
         op->opt_new = false;
-        res = process_cl_old(op, argc, argv);
+        res = old_parse_cmd_line(op, argc, argv);
         if ((0 == res) && op->opt_new)
-            res = process_cl_new(op, argc, argv);
+            res = new_parse_cmd_line(op, argc, argv);
     } else {
         op->opt_new = true;
-        res = process_cl_new(op, argc, argv);
+        res = new_parse_cmd_line(op, argc, argv);
         if ((0 == res) && (! op->opt_new))
-            res = process_cl_old(op, argc, argv);
+            res = old_parse_cmd_line(op, argc, argv);
     }
     return res;
 }
@@ -462,7 +468,7 @@ do_modes_0a(int sg_fd, void * resp, int mx_resp_len, bool mode6, bool noisy,
 /* stdin (one per line, comma separated list or space separated list). */
 /* Returns 0 if ok, or 1 if error. */
 static int
-build_diag_page(const char * inp, unsigned char * mp_arr, int * mp_arr_len,
+build_diag_page(const char * inp, uint8_t * mp_arr, int * mp_arr_len,
                 int max_arr_len)
 {
     int in_len, k, j, m;
@@ -638,7 +644,7 @@ static const char *
 find_page_code_desc(int page_num)
 {
     int k;
-    int num = sizeof(pc_desc_arr) / sizeof(pc_desc_arr[0]);
+    int num = SG_ARRAY_SIZE(pc_desc_arr);
     const struct page_code_desc * pcdp = &pc_desc_arr[0];
 
     for (k = 0; k < num; ++k, ++pcdp) {
@@ -654,7 +660,7 @@ static void
 list_page_codes()
 {
     int k;
-    int num = sizeof(pc_desc_arr) / sizeof(pc_desc_arr[0]);
+    int num = SG_ARRAY_SIZE(pc_desc_arr);
     const struct page_code_desc * pcdp = &pc_desc_arr[0];
 
     printf("Page_Code  Description\n");
@@ -667,20 +673,23 @@ list_page_codes()
 int
 main(int argc, char * argv[])
 {
-    int sg_fd, k, num, rsp_len, res, rsp_buff_size, pg, bd_len, resid;
+    int k, num, rsp_len, res, rsp_buff_size, pg, bd_len, resid, vb;
+    int sg_fd = -1;
     int read_in_len = 0;
     int ret = 0;
     struct opts_t opts;
     struct opts_t * op;
-    unsigned char * rsp_buff = NULL;
+    uint8_t * rsp_buff = NULL;
+    uint8_t * free_rsp_buff = NULL;
     const char * cp;
-    unsigned char * read_in = NULL;
+    uint8_t * read_in = NULL;
+    uint8_t * free_read_in = NULL;
 
     op = &opts;
     memset(op, 0, sizeof(opts));
     op->maxlen = DEF_ALLOC_LEN;
     op->page_code = -1;
-    res = process_cl(op, argc, argv);
+    res = parse_cmd_line(op, argc, argv);
     if (res)
         return SG_LIB_SYNTAX_ERROR;
     if (op->do_help) {
@@ -690,10 +699,27 @@ main(int argc, char * argv[])
             usage_old();
         return 0;
     }
-    if (op->do_version) {
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (op->verbose_given && op->version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        op->verbose_given = false;
+        op->version_given = false;
+        op->verbose = 0;
+    } else if (! op->verbose_given) {
+        pr2serr("set '-vv'\n");
+        op->verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", op->verbose);
+#else
+    if (op->verbose_given && op->version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (op->version_given) {
         pr2serr("Version string: %s\n", version_str);
         return 0;
     }
+
     rsp_buff_size = op->maxlen;
 
     if (NULL == op->device_name) {
@@ -701,15 +727,16 @@ main(int argc, char * argv[])
             list_page_codes();
             return 0;
         }
-        pr2serr("No DEVICE argument given\n");
+        pr2serr("No DEVICE argument given\n\n");
         if (op->opt_new)
             usage();
         else
             usage_old();
         return SG_LIB_SYNTAX_ERROR;
     }
+    vb = op->verbose;
     if (op->do_raw) {
-        read_in = (unsigned char *)calloc(op->maxlen, 1);
+        read_in = sg_memalign(op->maxlen, 0, &free_read_in, vb > 3);
         if (NULL == read_in) {
             pr2serr("unable to allocate %d bytes\n", op->maxlen);
             return SG_LIB_CAT_OTHER;
@@ -735,7 +762,7 @@ main(int argc, char * argv[])
             printf("setting -doff or -uoff only useful when -t is set\n");
             usage_old();
         }
-        ret = SG_LIB_SYNTAX_ERROR;
+        ret = SG_LIB_CONTRADICT;
         goto fini;
     }
     if ((op->do_selftest > 0) && op->do_deftest) {
@@ -746,7 +773,7 @@ main(int argc, char * argv[])
             printf("either set -s=SF or -t (not both)\n");
             usage_old();
         }
-        ret = SG_LIB_SYNTAX_ERROR;
+        ret = SG_LIB_CONTRADICT;
         goto fini;
     }
     if (op->do_raw) {
@@ -761,7 +788,7 @@ main(int argc, char * argv[])
                        "'-l'\n");
                 usage_old();
             }
-            ret = SG_LIB_SYNTAX_ERROR;
+            ret = SG_LIB_CONTRADICT;
             goto fini;
         }
         if (! op->do_pf) {
@@ -775,7 +802,7 @@ main(int argc, char * argv[])
     }
 #ifdef SG_LIB_WIN32
 #ifdef SG_LIB_WIN32_DIRECT
-    if (op->do_verbose > 4)
+    if (vb > 4)
         pr2serr("Initial win32 SPT interface state: %s\n",
                 scsi_pt_win32_spt_state() ? "direct" : "indirect");
     if (op->maxlen >= 16384)
@@ -783,14 +810,15 @@ main(int argc, char * argv[])
 #endif
 #endif
 
-    if ((sg_fd = sg_cmds_open_device(op->device_name, false /* rw */,
-                                     op->do_verbose)) < 0) {
-        pr2serr(ME "error opening file: %s: %s\n", op->device_name,
-                safe_strerror(-sg_fd));
-        ret = SG_LIB_FILE_ERROR;
+    if ((sg_fd = sg_cmds_open_device(op->device_name, false /* rw */, vb)) <
+         0) {
+        if (vb)
+            pr2serr(ME "error opening file: %s: %s\n", op->device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
         goto fini;
     }
-    rsp_buff = (unsigned char *)calloc(op->maxlen, 1);
+    rsp_buff = sg_memalign(op->maxlen, 0, &free_rsp_buff, vb > 3);
     if (NULL == rsp_buff) {
         pr2serr("unable to allocate %d bytes (2)\n", op->maxlen);
         ret = SG_LIB_CAT_OTHER;
@@ -799,7 +827,7 @@ main(int argc, char * argv[])
     if (op->do_extdur) {  /* fetch Extended self-test time from Control
                            * mode page with Mode Sense(10) command*/
         res = do_modes_0a(sg_fd, rsp_buff, 32, false /* mode6 */,
-                          true /* noisy */, op->do_verbose);
+                          true /* noisy */, vb);
         if (0 == res) {
             /* Mode sense(10) response, step over any block descriptors */
             num = sg_msense_calc_length(rsp_buff, 32, false, &bd_len);
@@ -826,7 +854,7 @@ main(int argc, char * argv[])
         pg = op->page_code;
         if (pg < 0)
             res = do_senddiag(sg_fd, 0, true /* pf */, false, false, false,
-                              rsp_buff, 4, op->timeout, 1, op->do_verbose);
+                              rsp_buff, 4, op->timeout, 1, vb);
         else
             res = 0;
         if (0 == res) {
@@ -834,7 +862,7 @@ main(int argc, char * argv[])
             if (0 == sg_ll_receive_diag_v2(sg_fd, (pg >= 0x0),
                                            ((pg >= 0x0) ? pg : 0), rsp_buff,
                                            rsp_buff_size, 0, &resid,
-                                           true, op->do_verbose)) {
+                                           true, vb)) {
                 rsp_buff_size -= resid;
                 if (rsp_buff_size < 4) {
                     pr2serr("RD resid (%d) indicates response too small "
@@ -844,17 +872,20 @@ main(int argc, char * argv[])
                 rsp_len = sg_get_unaligned_be16(rsp_buff + 2) + 4;
                 rsp_len= (rsp_len < rsp_buff_size) ? rsp_len : rsp_buff_size;
                 if (op->do_hex > 1)
-                    dStrHex((const char *)rsp_buff, rsp_len,
+                    hex2stdout(rsp_buff, rsp_len,
                             (2 == op->do_hex) ? 0 : -1);
                 else if (pg < 0x1) {
                     printf("Supported diagnostic pages response:\n");
                     if (op->do_hex)
-                        dStrHex((const char *)rsp_buff, rsp_len, 1);
+                        hex2stdout(rsp_buff, rsp_len, 1);
                     else {
                         for (k = 0; k < (rsp_len - 4); ++k) {
-                            cp = find_page_code_desc(rsp_buff[k + 4]);
-                            printf("  0x%02x  %s\n", rsp_buff[k + 4],
-                                   (cp ? cp : "<unknown>"));
+                            pg = rsp_buff[k + 4];
+                            cp = find_page_code_desc(pg);
+                            if (NULL == cp)
+                                cp = (pg < 0x80) ? "<unknown>" :
+                                                   "<vendor specific>";
+                            printf("  0x%02x  %s\n", pg, cp);
                         }
                     }
                 } else {
@@ -864,7 +895,7 @@ main(int argc, char * argv[])
                                "hex:\n", cp, pg);
                     else
                         printf("diagnostic page 0x%x response in hex:\n", pg);
-                    dStrHex((const char *)rsp_buff, rsp_len, 1);
+                    hex2stdout(rsp_buff, rsp_len, 1);
                 }
             } else {
                 ret = res;
@@ -877,7 +908,7 @@ main(int argc, char * argv[])
         }
     } else if (op->do_raw) {
         res = do_senddiag(sg_fd, 0, op->do_pf, false, false, false, read_in,
-                          read_in_len, op->timeout, 1, op->do_verbose);
+                          read_in_len, op->timeout, 1, vb);
         if (res) {
             ret = res;
             goto err_out;
@@ -885,7 +916,7 @@ main(int argc, char * argv[])
     } else {
         res = do_senddiag(sg_fd, op->do_selftest, op->do_pf, op->do_deftest,
                           op->do_doff, op->do_uoff, NULL, 0, op->timeout, 1,
-                          op->do_verbose);
+                          vb);
         if (0 == res) {
             if ((5 == op->do_selftest) || (6 == op->do_selftest))
                 printf("Foreground self-test returned GOOD status\n");
@@ -908,16 +939,23 @@ err_out:
     else
         pr2serr("SEND DIAGNOSTIC command, failed\n");
 err_out9:
-    if (op->do_verbose < 2)
+    if (vb < 2)
         pr2serr("  try again with '-vv' for more information\n");
 close_fini:
-    res = sg_cmds_close_device(sg_fd);
-    if ((res < 0) && (0 == ret))
-        ret = SG_LIB_FILE_ERROR;
+    if (sg_fd >= 0) {
+        res = sg_cmds_close_device(sg_fd);
+        if (0 == ret)
+            ret = sg_convert_errno(-res);
+    }
 fini:
-    if (read_in)
-        free(read_in);
-    if (rsp_buff)
-        free(rsp_buff);
+    if (free_read_in)
+        free(free_read_in);
+    if (free_rsp_buff)
+        free(free_rsp_buff);
+    if (0 == vb) {
+        if (! sg_if_can2stderr("sg_senddiag failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
+    }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

@@ -4,6 +4,8 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
@@ -16,13 +18,13 @@
 #include <sys/sysmacros.h>
 #include <linux/major.h>
 #include <sys/time.h>
-typedef unsigned char u_char;   /* horrible, for scsi.h */
+typedef uint8_t u_char;   /* horrible, for scsi.h */
 #include "sg_lib.h"
 #include "sg_io_linux.h"
 #include "sg_unaligned.h"
 
 /* A utility program for the Linux OS SCSI generic ("sg") device driver.
-*  Copyright (C) 1999-2002 D. Gilbert and P. Allworth
+*  Copyright (C) 1999-2018 D. Gilbert and P. Allworth
 *  This program is free software; you can redistribute it and/or modify
 *  it under the terms of the GNU General Public License as published by
 *  the Free Software Foundation; either version 2, or (at your option)
@@ -48,13 +50,12 @@ typedef unsigned char u_char;   /* horrible, for scsi.h */
 
 */
 
-static char * version_str = "0.59 20160528";
+static char * version_str = "0.61 20180627";
 /* resurrected from "0.55 20020509" */
 
 #define DEF_BLOCK_SIZE 512
 #define DEF_BLOCKS_PER_TRANSFER 128
 
-/* #define SG_DEBUG */
 
 #define SENSE_BUFF_LEN 32       /* Arbitrary, could be larger */
 #define DEF_TIMEOUT 60000       /* 60,000 millisecs == 60 seconds */
@@ -125,11 +126,11 @@ typedef struct request_element
     int wr;
     int blk;
     int num_blks;
-    unsigned char * buffp;
-    unsigned char * alloc_bp;
+    uint8_t * buffp;
+    uint8_t * alloc_bp;
     sg_io_hdr_t io_hdr;
-    unsigned char cmd[S_RW_LEN];
-    unsigned char sb[SENSE_BUFF_LEN];
+    uint8_t cmd[S_RW_LEN];
+    uint8_t sb[SENSE_BUFF_LEN];
     int bs;
     int dio;
     int dio_incomplete;
@@ -148,6 +149,20 @@ static const char * proc_allow_dio = "/proc/scsi/sg/allow_dio";
 
 static int sg_finish_io(int wr, Rq_elem * rep);
 
+
+/* Returns the number of times 'ch' is found in string 's' given the
+ * string's length. */
+static int
+num_chs_in_str(const char * s, int slen, int ch)
+{
+    int res = 0;
+
+    while (--slen >= 0) {
+        if (ch == s[slen])
+            ++res;
+    }
+    return res;
+}
 
 static void
 install_handler (int sig_num, void (*sig_handler) (int sig))
@@ -285,9 +300,9 @@ static int
 read_capacity(int sg_fd, int * num_sect, int * sect_sz)
 {
     int res;
-    unsigned char rc_cdb [10] = {0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-    unsigned char rcBuff[64];
-    unsigned char sense_b[64];
+    uint8_t rc_cdb [10] = {0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    uint8_t rcBuff[64];
+    uint8_t sense_b[64];
     sg_io_hdr_t io_hdr;
 
     memset(&io_hdr, 0, sizeof(sg_io_hdr_t));
@@ -314,7 +329,7 @@ read_capacity(int sg_fd, int * num_sect, int * sect_sz)
     }
     *num_sect = 1 + sg_get_unaligned_be32(rcBuff + 0);
     *sect_sz = sg_get_unaligned_be32(rcBuff + 4);
-#ifdef SG_DEBUG
+#ifdef DEBUG
     fprintf(stderr, "number of sectors=%d, sector size=%d\n",
             *num_sect, *sect_sz);
 #endif
@@ -609,7 +624,7 @@ prepare_rq_elems(Rq_coll * clp, const char * inf, const char * outf)
         psz = getpagesize();
         if (NULL == (rep->alloc_bp = malloc(sz + psz)))
             return 1;
-        rep->buffp = (unsigned char *)
+        rep->buffp = (uint8_t *)
                 (((unsigned long)rep->alloc_bp + psz - 1) & (~(psz - 1)));
         rep->qstate = QS_IDLE;
         rep->bs = clp->bs;
@@ -716,6 +731,8 @@ decider(Rq_coll * clp, int first_xfer, int * req_indexp)
 int
 main(int argc, char * argv[])
 {
+    bool verbose_given = false;
+    bool version_given = false;
     int skip = 0;
     int seek = 0;
     int ibs = 0;
@@ -725,7 +742,7 @@ main(int argc, char * argv[])
     char * buf;
     char inf[INOUTF_SZ];
     char outf[INOUTF_SZ];
-    int res, k;
+    int res, k, n, keylen;
     int in_num_sect = 0;
     int out_num_sect = 0;
     int num_threads = DEF_NUM_THREADS;
@@ -743,10 +760,6 @@ main(int argc, char * argv[])
     rcoll.out_type = FT_OTHER;
     inf[0] = '\0';
     outf[0] = '\0';
-    if (argc < 2) {
-        usage();
-        return 1;
-    }
 
     for(k = 1; k < argc; k++) {
         if (argv[k])
@@ -757,6 +770,7 @@ main(int argc, char * argv[])
             buf++;
         if (*buf)
             *buf++ = '\0';
+        keylen = strlen(key);
         if (strcmp(key,"if") == 0)
             strncpy(inf, buf, INOUTF_SZ);
         else if (strcmp(key,"of") == 0)
@@ -783,20 +797,72 @@ main(int argc, char * argv[])
             rcoll.coe = sg_get_num(buf);
         else if (0 == strcmp(key,"gen"))
             gen = sg_get_num(buf);
-        else if (0 == strncmp(key,"deb", 3))
+        else if ((0 == strncmp(key,"deb", 3)) || (0 == strncmp(key,"verb", 4)))
             rcoll.debug = sg_get_num(buf);
         else if (0 == strcmp(key,"time"))
             do_time = sg_get_num(buf);
-        else if (0 == strncmp(key, "--vers", 6)) {
-            fprintf(stderr, "sgq_dd for sg version 3 driver: %s\n",
-                    version_str);
+        else if ((keylen > 1) && ('-' == key[0]) && ('-' != key[1])) {
+            res = 0;
+            n = num_chs_in_str(key + 1, keylen - 1, 'h');
+            if (n > 0) {
+                usage();
+                return 0;
+            }
+            n = num_chs_in_str(key + 1, keylen - 1, 'v');
+            if (n > 0)
+                verbose_given = true;
+            rcoll.debug += n;
+            res += n;
+            n = num_chs_in_str(key + 1, keylen - 1, 'V');
+            if (n > 0)
+                version_given = true;
+            res += n;
+            if (res < (keylen - 1)) {
+                fprintf(stderr, "Unrecognised short option in '%s', try "
+                        "'--help'\n", key);
+                return SG_LIB_SYNTAX_ERROR;
+            }
+        } else if (0 == strncmp(key, "--help", 6)) {
+            usage();
             return 0;
-        }
+        } else if (0 == strncmp(key, "--verb", 6)) {
+            verbose_given = true;
+            ++rcoll.debug;
+        } else if (0 == strncmp(key, "--vers", 6))
+            version_given = true;
         else {
             fprintf(stderr, "Unrecognized argument '%s'\n", key);
             usage();
             return 1;
         }
+    }
+#ifdef DEBUG
+    fprintf(stderr, "In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        fprintf(stderr, "but override: '-vV' given, zero verbose and "
+                "continue\n");
+        verbose_given = false;
+        version_given = false;
+        rcoll.debug = 0;
+    } else if (! verbose_given) {
+        fprintf(stderr, "set '-vv'\n");
+        rcoll.debug = 2;
+    } else
+        fprintf(stderr, "keep verbose=%d\n", rcoll.debug);
+#else
+    if (verbose_given && version_given)
+        fprintf(stderr, "Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        fprintf(stderr, "sgq_dd for sg version 3 driver: %s\n",
+                version_str);
+            return 0;
+        return 0;
+    }
+
+    if (argc < 2) {
+        usage();
+        return 1;
     }
     if (rcoll.bs <= 0) {
         rcoll.bs = DEF_BLOCK_SIZE;
@@ -900,7 +966,7 @@ main(int argc, char * argv[])
         }
     }
     if ((STDIN_FILENO == rcoll.infd) && (STDOUT_FILENO == rcoll.outfd)) {
-        fprintf(stderr, "Disallow both if and of to be stdin and stdout");
+        fprintf(stderr, "Disallow both if and of to be stdin and stdout\n");
         return 1;
     }
     if ((FT_OTHER == rcoll.in_type) && (FT_OTHER == rcoll.out_type) && !gen) {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006-2017 Luben Tuikov and Douglas Gilbert.
+ * Copyright (c) 2006-2018 Luben Tuikov and Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -10,8 +10,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdbool.h>
 #include <ctype.h>
+#include <errno.h>
 #include <string.h>
 #include <getopt.h>
 #define __STDC_FORMAT_MACROS 1
@@ -23,15 +25,20 @@
 #include "sg_lib.h"
 #include "sg_cmds_basic.h"
 #include "sg_cmds_extra.h"
-#include "sg_pt.h"      /* needed for scsi_pt_win32_direct() */
 #include "sg_unaligned.h"
 #include "sg_pr2serr.h"
+
+#ifdef SG_LIB_WIN32
+#ifdef SG_LIB_WIN32_DIRECT
+#include "sg_pt.h"      /* needed for scsi_pt_win32_direct() */
+#endif
+#endif
 
 /*
  * This utility issues the SCSI WRITE BUFFER command to the given device.
  */
 
-static const char * version_str = "1.23 20171008";    /* spc5r10 */
+static const char * version_str = "1.28 20180628";    /* spc5r19 */
 
 #define ME "sg_write_buffer: "
 #define DEF_XFER_LEN (8 * 1024 * 1024)
@@ -44,6 +51,8 @@ static const char * version_str = "1.23 20171008";    /* spc5r10 */
 
 static struct option long_options[] = {
         {"bpw", required_argument, 0, 'b'},
+        {"dry-run", no_argument, 0, 'd'},
+        {"dry_run", no_argument, 0, 'd'},
         {"help", no_argument, 0, 'h'},
         {"id", required_argument, 0, 'i'},
         {"in", required_argument, 0, 'I'},
@@ -66,17 +75,21 @@ static void
 usage()
 {
     pr2serr("Usage: "
-            "sg_write_buffer [--bpw=CS] [--help] [--id=ID] [--in=FILE]\n"
+            "sg_write_buffer [--bpw=CS] [--dry-run] [--help] [--id=ID] "
+            "[--in=FILE]\n"
             "                       [--length=LEN] [--mode=MO] "
-            "[--offset=OFF] [--read-stdin]\n"
-            "                       [--skip=SKIP] [--specific=MS] "
-            "[--timeout=TO]\n"
-            "                       [--verbose] [--version] DEVICE\n"
+            "[--offset=OFF]\n"
+            "                       [--read-stdin] [--skip=SKIP] "
+            "[--specific=MS]\n"
+            "                       [--timeout=TO] [--verbose] [--version] "
+            "DEVICE\n"
             "  where:\n"
             "    --bpw=CS|-b CS         CS is chunk size: bytes per write "
             "buffer\n"
             "                           command (def: 0 -> as many as "
             "possible)\n"
+            "    --dry-run|-d           skip WRITE BUFFER commands, do "
+            "everything else\n"
             "    --help|-h              print out usage message then exit\n"
             "    --id=ID|-i ID          buffer identifier (0 (default) to "
             "255)\n"
@@ -178,9 +191,13 @@ int
 main(int argc, char * argv[])
 {
     bool bpw_then_activate = false;
-    bool got_stdin;
+    bool dry_run = false;
+    bool got_stdin = false;
+    bool verbose_given = false;
+    bool version_given = false;
     bool wb_len_given = false;
-    int sg_fd, infd, res, c, len, k, n;
+    int infd, res, c, len, k, n;
+    int sg_fd = -1;
     int bpw = 0;
     int do_help = 0;
     int ret = 0;
@@ -194,7 +211,8 @@ main(int argc, char * argv[])
     int wb_mspec = 0;
     const char * device_name = NULL;
     const char * file_name = NULL;
-    unsigned char * dop = NULL;
+    uint8_t * dop = NULL;
+    uint8_t * free_dop = NULL;
     char * cp;
     const struct mode_s * mp;
     char ebuff[EBUFF_SZ];
@@ -202,7 +220,7 @@ main(int argc, char * argv[])
     while (1) {
         int option_index = 0;
 
-        c = getopt_long(argc, argv, "b:hi:I:l:m:o:rs:S:t:vV", long_options,
+        c = getopt_long(argc, argv, "b:dhi:I:l:m:o:rs:S:t:vV", long_options,
                         &option_index);
         if (c == -1)
             break;
@@ -219,6 +237,9 @@ main(int argc, char * argv[])
                 if (0 == strncmp("act", cp + 1, 3))
                     bpw_then_activate = true;
             }
+            break;
+        case 'd':
+            dry_run = true;
             break;
         case 'h':
         case '?':
@@ -297,11 +318,12 @@ main(int argc, char * argv[])
             }
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr(ME "version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
             usage();
@@ -330,8 +352,29 @@ main(int argc, char * argv[])
         }
     }
 
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr("version: %s\n", version_str);
+        return 0;
+    }
+
     if (NULL == device_name) {
-        pr2serr("missing device name!\n");
+        pr2serr("Missing device name!\n\n");
         usage();
         return SG_LIB_SYNTAX_ERROR;
     }
@@ -352,16 +395,19 @@ main(int argc, char * argv[])
 
     sg_fd = sg_cmds_open_device(device_name, false /* rw */, verbose);
     if (sg_fd < 0) {
-        pr2serr(ME "open error: %s: %s\n", device_name,
-                safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        if (verbose)
+            pr2serr(ME "open error: %s: %s\n", device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
+        goto err_out;
     }
     if (file_name || (wb_len > 0)) {
         if (0 == wb_len)
             wb_len = DEF_XFER_LEN;
-        if (NULL == (dop = (unsigned char *)malloc(wb_len))) {
+        dop = sg_memalign(wb_len, 0, &free_dop, false);
+        if (NULL == dop) {
             pr2serr(ME "out of memory\n");
-            ret = SG_LIB_SYNTAX_ERROR;
+            ret = sg_convert_errno(ENOMEM);
             goto err_out;
         }
         memset(dop, 0xff, wb_len);
@@ -376,32 +422,32 @@ main(int argc, char * argv[])
                 infd = STDIN_FILENO;
             } else {
                 if ((infd = open(file_name, O_RDONLY)) < 0) {
+                    ret = sg_convert_errno(errno);
                     snprintf(ebuff, EBUFF_SZ,
                              ME "could not open %s for reading", file_name);
                     perror(ebuff);
-                    ret = SG_LIB_FILE_ERROR;
                     goto err_out;
                 } else if (sg_set_binary_mode(infd) < 0)
                     perror("sg_set_binary_mode");
                 if (wb_skip > 0) {
                     if (lseek(infd, wb_skip, SEEK_SET) < 0) {
+                        ret = sg_convert_errno(errno);
                         snprintf(ebuff,  EBUFF_SZ, ME "couldn't skip to "
                                  "required position on %s", file_name);
                         perror(ebuff);
                         close(infd);
-                        ret = SG_LIB_FILE_ERROR;
                         goto err_out;
                     }
                 }
             }
             res = read(infd, dop, wb_len);
             if (res < 0) {
+                ret = sg_convert_errno(errno);
                 snprintf(ebuff, EBUFF_SZ, ME "couldn't read from %s",
                          file_name);
                 perror(ebuff);
                 if (! got_stdin)
                     close(infd);
-                ret = SG_LIB_FILE_ERROR;
                 goto err_out;
             }
             if (res < wb_len) {
@@ -438,28 +484,47 @@ main(int argc, char * argv[])
                 pr2serr("sending write buffer, mode=0x%x, mspec=%d, id=%d, "
                         " offset=%d, len=%d\n", wb_mode, wb_mspec, wb_id,
                         wb_offset + k, n);
-            res = sg_ll_write_buffer_v2(sg_fd, wb_mode, wb_mspec, wb_id,
-                                        wb_offset + k, dop + k, n,
-                                        wb_timeout, true, verbose);
+            if (dry_run) {
+                if (verbose)
+                    pr2serr("skipping WRITE BUFFER command due to "
+                            "--dry-run\n");
+                res = 0;
+            } else
+                res = sg_ll_write_buffer_v2(sg_fd, wb_mode, wb_mspec, wb_id,
+                                            wb_offset + k, dop + k, n,
+                                            wb_timeout, true, verbose);
             if (res)
                 break;
         }
         if (bpw_then_activate) {
             if (verbose)
                 pr2serr("sending Activate deferred microcode [0xf]\n");
-            res = sg_ll_write_buffer_v2(sg_fd, MODE_ACTIVATE_MC,
-			   	        0 /* buffer_id */,
-				       	0 /* buffer_offset */, 0,
-                                        NULL, 0, wb_timeout, true, verbose);
+            if (dry_run) {
+                if (verbose)
+                    pr2serr("skipping WRITE BUFFER(ACTIVATE) command due to "
+                            "--dry-run\n");
+                res = 0;
+            } else
+                res = sg_ll_write_buffer_v2(sg_fd, MODE_ACTIVATE_MC,
+                                            0 /* buffer_id */,
+                                            0 /* buffer_offset */, 0,
+                                            NULL, 0, wb_timeout, true,
+                                            verbose);
         }
     } else {
         if (verbose)
             pr2serr("sending single write buffer, mode=0x%x, mpsec=%d, "
                     "id=%d, offset=%d, len=%d\n", wb_mode, wb_mspec, wb_id,
                     wb_offset, wb_len);
-        res = sg_ll_write_buffer_v2(sg_fd, wb_mode, wb_mspec, wb_id,
-                                    wb_offset, dop, wb_len, wb_timeout, true,
-                                    verbose);
+        if (dry_run) {
+            if (verbose)
+                pr2serr("skipping WRITE BUFFER(all in one) command due to "
+                        "--dry-run\n");
+            res = 0;
+        } else
+            res = sg_ll_write_buffer_v2(sg_fd, wb_mode, wb_mspec, wb_id,
+                                        wb_offset, dop, wb_len, wb_timeout,
+                                        true, verbose);
     }
     if (0 != res) {
         char b[80];
@@ -470,13 +535,20 @@ main(int argc, char * argv[])
     }
 
 err_out:
-    if (dop)
-        free(dop);
-    res = sg_cmds_close_device(sg_fd);
-    if (res < 0) {
-        pr2serr("close error: %s\n", safe_strerror(-res));
-        if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+    if (free_dop)
+        free(free_dop);
+    if (sg_fd >= 0) {
+        res = sg_cmds_close_device(sg_fd);
+        if (res < 0) {
+            pr2serr("close error: %s\n", safe_strerror(-res));
+            if (0 == ret)
+                ret = sg_convert_errno(-res);
+        }
+    }
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_write_buffer failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

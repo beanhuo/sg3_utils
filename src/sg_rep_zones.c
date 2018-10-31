@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2017 Douglas Gilbert.
+ * Copyright (c) 2014-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -12,6 +12,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <string.h>
+#include <errno.h>
 #include <ctype.h>
 #include <getopt.h>
 #define __STDC_FORMAT_MACROS 1
@@ -20,6 +21,7 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_lib_data.h"
 #include "sg_pt.h"
@@ -34,7 +36,7 @@
  * and decodes the response. Based on zbc-r02.pdf
  */
 
-static const char * version_str = "1.12 20171103";
+static const char * version_str = "1.17 20180628";
 
 #define MAX_RZONES_BUFF_LEN (1024 * 1024)
 #define DEF_RZONES_BUFF_LEN (1024 * 8)
@@ -123,10 +125,10 @@ sg_ll_report_zones(int sg_fd, uint64_t zs_lba, bool partial, int report_opts,
                    int verbose)
 {
     int k, ret, res, sense_cat;
-    unsigned char rz_cdb[SG_ZONING_IN_CMDLEN] =
+    uint8_t rz_cdb[SG_ZONING_IN_CMDLEN] =
           {SG_ZONING_IN, REPORT_ZONES_SA, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0,
            0, 0, 0, 0};
-    unsigned char sense_b[SENSE_BUFF_LEN];
+    uint8_t sense_b[SENSE_BUFF_LEN];
     struct sg_pt_base * ptvp;
 
     sg_put_unaligned_be64(zs_lba, rz_cdb + 2);
@@ -148,12 +150,12 @@ sg_ll_report_zones(int sg_fd, uint64_t zs_lba, bool partial, int report_opts,
     }
     set_scsi_pt_cdb(ptvp, rz_cdb, sizeof(rz_cdb));
     set_scsi_pt_sense(ptvp, sense_b, sizeof(sense_b));
-    set_scsi_pt_data_in(ptvp, (unsigned char *)resp, mx_resp_len);
+    set_scsi_pt_data_in(ptvp, (uint8_t *)resp, mx_resp_len);
     res = do_scsi_pt(ptvp, sg_fd, DEF_PT_TIMEOUT, verbose);
     ret = sg_cmds_process_resp(ptvp, "report zones", res, mx_resp_len,
                                sense_b, noisy, verbose, &sense_cat);
     if (-1 == ret)
-        ;
+        ret = sg_convert_errno(get_scsi_pt_os_err(ptvp));
     else if (-2 == ret) {
         switch (sense_cat) {
         case SG_LIB_CAT_RECOVERED:
@@ -173,11 +175,11 @@ sg_ll_report_zones(int sg_fd, uint64_t zs_lba, bool partial, int report_opts,
 }
 
 static void
-dStrRaw(const char* str, int len)
+dStrRaw(const uint8_t * str, int len)
 {
     int k;
 
-    for (k = 0 ; k < len; ++k)
+    for (k = 0; k < len; ++k)
         printf("%c", str[k]);
 }
 
@@ -275,7 +277,10 @@ main(int argc, char * argv[])
     bool do_partial = false;
     bool do_raw = false;
     bool o_readonly = false;
-    int sg_fd, k, res, c, zl_len, len, zones, resid, rlen, zt, zc, same;
+    bool verbose_given = false;
+    bool version_given = false;
+    int k, res, c, zl_len, len, zones, resid, rlen, zt, zc, same;
+    int sg_fd = -1;
     int do_help = 0;
     int do_hex = 0;
     int maxlen = 0;
@@ -285,8 +290,9 @@ main(int argc, char * argv[])
     uint64_t st_lba = 0;
     int64_t ll;
     const char * device_name = NULL;
-    unsigned char * reportZonesBuff = NULL;
-    unsigned char * bp;
+    uint8_t * reportZonesBuff = NULL;
+    uint8_t * free_rzbp = NULL;
+    uint8_t * bp;
     char b[80];
 
     while (1) {
@@ -339,11 +345,12 @@ main(int argc, char * argv[])
             st_lba = (uint64_t)ll;
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr("version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
             usage(1);
@@ -361,6 +368,26 @@ main(int argc, char * argv[])
             usage(1);
             return SG_LIB_SYNTAX_ERROR;
         }
+    }
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr("version: %s\n", version_str);
+        return 0;
     }
 
     if (do_help) {
@@ -382,17 +409,20 @@ main(int argc, char * argv[])
 
     sg_fd = sg_cmds_open_device(device_name, o_readonly, verbose);
     if (sg_fd < 0) {
-        pr2serr("open error: %s: %s\n", device_name,
-                safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        if (verbose)
+            pr2serr("open error: %s: %s\n", device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
+        goto the_end;
     }
 
     if (0 == maxlen)
         maxlen = DEF_RZONES_BUFF_LEN;
-    reportZonesBuff = (unsigned char *)calloc(1, maxlen);
+    reportZonesBuff = (uint8_t *)sg_memalign(maxlen, 0, &free_rzbp,
+                                             verbose > 3);
     if (NULL == reportZonesBuff) {
-        pr2serr("unable to malloc %d bytes\n", maxlen);
-        return SG_LIB_CAT_OTHER;
+        pr2serr("unable to sg_memalign %d bytes\n", maxlen);
+        return sg_convert_errno(ENOMEM);
     }
 
     res = sg_ll_report_zones(sg_fd, st_lba, do_partial, reporting_opt,
@@ -414,11 +444,11 @@ main(int argc, char * argv[])
         } else
             len = zl_len;
         if (do_raw) {
-            dStrRaw((const char *)reportZonesBuff, len);
+            dStrRaw(reportZonesBuff, len);
             goto the_end;
         }
         if (do_hex && (2 != do_hex)) {
-            dStrHex((const char *)reportZonesBuff, len,
+            hex2stdout(reportZonesBuff, len,
                     ((1 == do_hex) ? 1 : -1));
             goto the_end;
         }
@@ -437,7 +467,7 @@ main(int argc, char * argv[])
         for (k = 0, bp = reportZonesBuff + 64; k < zones; ++k, bp += 64) {
             printf(" Zone descriptor: %d\n", k);
             if (do_hex) {
-                dStrHex((const char *)bp, len, -1);
+                hex2stdout(bp, len, -1);
                 continue;
             }
             zt = bp[0] & 0xf;
@@ -466,13 +496,20 @@ main(int argc, char * argv[])
     }
 
 the_end:
-    if (reportZonesBuff)
-        free(reportZonesBuff);
-    res = sg_cmds_close_device(sg_fd);
-    if (res < 0) {
-        pr2serr("close error: %s\n", safe_strerror(-res));
-        if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+    if (free_rzbp)
+        free(free_rzbp);
+    if (sg_fd >= 0) {
+        res = sg_cmds_close_device(sg_fd);
+        if (res < 0) {
+            pr2serr("close error: %s\n", safe_strerror(-res));
+            if (0 == ret)
+                ret = sg_convert_errno(-res);
+        }
+    }
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_rep_zones failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

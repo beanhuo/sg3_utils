@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2017 Hannes Reinecke.
+ * Copyright (c) 2010-2018 Hannes Reinecke.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -12,6 +12,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <string.h>
+#include <errno.h>
 #include <getopt.h>
 #define __STDC_FORMAT_MACROS 1
 #include <inttypes.h>
@@ -19,6 +20,7 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_cmds_basic.h"
 #include "sg_cmds_extra.h"
@@ -33,7 +35,7 @@
  * SCSI device.
  */
 
-static const char * version_str = "1.08 20171006";    /* sbc4r10 */
+static const char * version_str = "1.13 20180628";    /* sbc4r10 */
 
 #define MAX_REFER_BUFF_LEN (1024 * 1024)
 #define DEF_REFER_BUFF_LEN 256
@@ -46,8 +48,7 @@ static const char * version_str = "1.08 20171006";    /* sbc4r10 */
 #define TPGS_STATE_OFFLINE 0xe          /* SPC-4 rev 9 */
 #define TPGS_STATE_TRANSITIONING 0xf
 
-static unsigned char referralBuff[DEF_REFER_BUFF_LEN];
-static unsigned char * referralBuffp = referralBuff;
+static uint8_t referralBuff[DEF_REFER_BUFF_LEN];
 
 static const char *decode_tpgs_state(const int st)
 {
@@ -85,6 +86,7 @@ static struct option long_options[] = {
         {"lba", required_argument, 0, 'l'},
         {"maxlen", required_argument, 0, 'm'},
         {"one-segment", no_argument, 0, 's'},
+        {"one_segment", no_argument, 0, 's'},
         {"raw", no_argument, 0, 'r'},
         {"readonly", no_argument, 0, 'R'},
         {"verbose", no_argument, 0, 'v'},
@@ -119,11 +121,11 @@ usage()
 }
 
 static void
-dStrRaw(const char* str, int len)
+dStrRaw(const uint8_t * str, int len)
 {
     int k;
 
-    for (k = 0 ; k < len; ++k)
+    for (k = 0; k < len; ++k)
         printf("%c", str[k]);
 }
 
@@ -132,7 +134,7 @@ dStrRaw(const char* str, int len)
  * -1 for error.
  */
 static int
-decode_referral_desc(const unsigned char * bp, int bytes)
+decode_referral_desc(const uint8_t * bp, int bytes)
 {
     int j, n;
     uint64_t first, last;
@@ -171,7 +173,10 @@ main(int argc, char * argv[])
     bool do_one_segment = false;
     bool o_readonly = false;
     bool do_raw = false;
-    int sg_fd, k, res, c, rlen;
+    bool verbose_given = false;
+    bool version_given = false;
+    int k, res, c, rlen;
+    int sg_fd = -1;
     int do_hex = 0;
     int maxlen = DEF_REFER_BUFF_LEN;
     int verbose = 0;
@@ -180,7 +185,9 @@ main(int argc, char * argv[])
     int64_t ll;
     uint64_t lba = 0;
     const char * device_name = NULL;
-    const unsigned char * bp;
+    const uint8_t * bp;
+    uint8_t * referralBuffp = referralBuff;
+    uint8_t * free_referralBuffp = NULL;
 
     while (1) {
         int option_index = 0;
@@ -224,11 +231,12 @@ main(int argc, char * argv[])
             o_readonly = true;
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr("version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
             usage();
@@ -247,17 +255,39 @@ main(int argc, char * argv[])
             return SG_LIB_SYNTAX_ERROR;
         }
     }
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr("version: %s\n", version_str);
+        return 0;
+    }
 
     if (NULL == device_name) {
-        pr2serr("No DEVICE argument given\n");
+        pr2serr("No DEVICE argument given\n\n");
         usage();
         return SG_LIB_SYNTAX_ERROR;
     }
     if (maxlen > DEF_REFER_BUFF_LEN) {
-        referralBuffp = (unsigned char *)calloc(maxlen, 1);
+        referralBuffp = (uint8_t *)sg_memalign(maxlen, 0,
+                                               &free_referralBuffp,
+                                               verbose > 3);
         if (NULL == referralBuffp) {
             pr2serr("unable to allocate %d bytes on heap\n", maxlen);
-            return SG_LIB_SYNTAX_ERROR;
+            return sg_convert_errno(ENOMEM);
         }
     }
     if (do_raw) {
@@ -270,8 +300,10 @@ main(int argc, char * argv[])
 
     sg_fd = sg_cmds_open_device(device_name, o_readonly, verbose);
     if (sg_fd < 0) {
-        pr2serr("open error: %s: %s\n", device_name, safe_strerror(-sg_fd));
-        ret = SG_LIB_FILE_ERROR;
+        if (verbose)
+            pr2serr("open error: %s: %s\n", device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
         goto free_buff;
     }
 
@@ -292,11 +324,11 @@ main(int argc, char * argv[])
             rlen = maxlen;
         k = (rlen > maxlen) ? maxlen : rlen;
         if (do_raw) {
-            dStrRaw((const char *)referralBuffp, k);
+            dStrRaw(referralBuffp, k);
             goto the_end;
         }
         if (do_hex) {
-            dStrHex((const char *)referralBuffp, k, 1);
+            hex2stdout(referralBuffp, k, 1);
             goto the_end;
         }
         if (maxlen < 4) {
@@ -339,10 +371,15 @@ the_end:
     if (res < 0) {
         pr2serr("close error: %s\n", safe_strerror(-res));
         if (0 == ret)
-            ret = SG_LIB_FILE_ERROR;
+            ret = sg_convert_errno(-res);
     }
 free_buff:
-    if (referralBuffp && (referralBuffp != referralBuff))
-        free(referralBuffp);
+    if (free_referralBuffp)
+        free(free_referralBuffp);
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_referrals failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
+    }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

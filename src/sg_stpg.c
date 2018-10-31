@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2004-2017 Hannes Reinecke, Christophe Varoqui, Douglas Gilbert
+* Copyright (c) 2004-2018 Hannes Reinecke, Christophe Varoqui, Douglas Gilbert
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -32,7 +32,7 @@
  * to the given SCSI device.
  */
 
-static const char * version_str = "1.15 20171020";
+static const char * version_str = "1.19 20180628";
 
 #define TGT_GRP_BUFF_LEN 1024
 #define MX_ALLOC_LEN (0xc000 + 0x80)
@@ -48,14 +48,14 @@ static const char * version_str = "1.15 20171020";
 #ifdef __cplusplus
 
 // C++ does not support designated initializers
-static const unsigned char state_sup_mask[] = {
+static const uint8_t state_sup_mask[] = {
     0x1, 0x2, 0x4, 0x8, 0x0, 0x0, 0x0, 0x0,
     0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x40, 0x80,
 };
 
 #else
 
-static const unsigned char state_sup_mask[] = {
+static const uint8_t state_sup_mask[] = {
         [TPGS_STATE_OPTIMIZED]     = 0x01,
         [TPGS_STATE_NONOPTIMIZED]  = 0x02,
         [TPGS_STATE_STANDBY]       = 0x04,
@@ -129,21 +129,21 @@ usage()
 }
 
 static void
-dStrRaw(const char* str, int len)
+dStrRaw(const uint8_t * str, int len)
 {
     int k;
 
-    for (k = 0 ; k < len; ++k)
+    for (k = 0; k < len; ++k)
         printf("%c", str[k]);
 }
 
 static int
-decode_target_port(unsigned char * buff, int len, int *d_id, int *d_tpg)
+decode_target_port(uint8_t * buff, int len, int *d_id, int *d_tpg)
 {
     int c_set, assoc, desig_type, i_len;
     int off, u;
-    const unsigned char * bp;
-    const unsigned char * ip;
+    const uint8_t * bp;
+    const uint8_t * ip;
 
     *d_id = -1;
     *d_tpg = -1;
@@ -166,7 +166,7 @@ decode_target_port(unsigned char * buff, int len, int *d_id, int *d_tpg)
             if ((1 != c_set) || (1 != assoc) || (4 != i_len)) {
                 pr2serr("      << expected binary code_set, target port "
                         "association, length 4>>\n");
-                dStrHexErr((const char *)ip, i_len, 0);
+                hex2stderr(ip, i_len, 0);
                 break;
             }
             *d_id = sg_get_unaligned_be16(ip + 2);
@@ -175,7 +175,7 @@ decode_target_port(unsigned char * buff, int len, int *d_id, int *d_tpg)
             if ((1 != c_set) || (1 != assoc) || (4 != i_len)) {
                 pr2serr("      << expected binary code_set, target port "
                         "association, length 4>>\n");
-                dStrHexErr((const char *)ip, i_len, 0);
+                hex2stderr(ip, i_len, 0);
                 break;
             }
             *d_tpg = sg_get_unaligned_be16(ip + 2);
@@ -271,10 +271,10 @@ transition_tpgs_states(struct tgtgrp *tgtState, int numgrp, int portgroup,
 }
 
 static void
-encode_tpgs_states(unsigned char *buff, struct tgtgrp *tgtState, int numgrp)
+encode_tpgs_states(uint8_t *buff, struct tgtgrp *tgtState, int numgrp)
 {
      int i;
-     unsigned char *desc;
+     uint8_t *desc;
 
      for (i = 0, desc = buff + 4; i < numgrp; desc += 4, i++) {
           desc[0] = tgtState[i].current & 0x0f;
@@ -282,9 +282,9 @@ encode_tpgs_states(unsigned char *buff, struct tgtgrp *tgtState, int numgrp)
      }
 }
 
-/* Read numbers (up to 32 bits in size) from command line (comma separated */
-/* list). Assumed decimal unless prefixed by '0x', '0X' or contains */
-/* trailing 'h' or 'H' (which indicate hex). Returns 0 if ok, 1 if error. */
+/* Read numbers (up to 32 bits in size) from command line (comma separated
+ * list). Assumed decimal unless prefixed by '0x', '0X' or contains traling
+ * 'h' or 'H' (which indicate hex). Returns 0 if ok, else error code. */
 static int
 build_port_arr(const char * inp, int * port_arr, int * port_arr_len,
                int max_arr_len)
@@ -296,15 +296,15 @@ build_port_arr(const char * inp, int * port_arr, int * port_arr_len,
 
     if ((NULL == inp) || (NULL == port_arr) ||
         (NULL == port_arr_len))
-        return 1;
+        return SG_LIB_LOGIC_ERROR;
     lcp = inp;
     in_len = strlen(inp);
     if (0 == in_len)
         *port_arr_len = 0;
     k = strspn(inp, "0123456789aAbBcCdDeEfFhHxX,");
     if (in_len != k) {
-        pr2serr("build_port_arr: error at pos %d\n", k + 1);
-        return 1;
+        pr2serr("%s: error at pos %d\n", __func__, k + 1);
+        return SG_LIB_SYNTAX_ERROR;
     }
     for (k = 0; k < max_arr_len; ++k) {
         v = sg_get_num_nomult(lcp);
@@ -315,25 +315,23 @@ build_port_arr(const char * inp, int * port_arr, int * port_arr_len,
                 break;
             lcp = cp + 1;
         } else {
-            pr2serr("build_port_arr: error at pos %d\n",
-                    (int)(lcp - inp + 1));
-            return 1;
+            pr2serr("%s: error at pos %d\n", __func__, (int)(lcp - inp + 1));
+            return SG_LIB_SYNTAX_ERROR;
         }
     }
     *port_arr_len = k + 1;
     if (k == max_arr_len) {
-        pr2serr("build_port_arr: array length exceeded\n");
-        return 1;
+        pr2serr("%s: array length exceeded\n", __func__);
+        return SG_LIB_SYNTAX_ERROR;
     }
     return 0;
 }
 
-/* Read numbers (up to 32 bits in size) from command line (comma separated */
-/* list). Assumed decimal unless prefixed by '0x', '0X' or contains */
-/* trailing 'h' or 'H' (which indicate hex). Also accepts 'ao' for active */
-/* optimized [0], 'an' for active/non-optimized [1], 's' for standby [2], */
-/* 'u' for unavailable [3], 'o' for offline [14]. */
-/* Returns 0 if ok, 1 if error. */
+/* Read numbers (up to 32 bits in size) from command line (comma separated
+ * list). Assumed decimal unless prefixed by '0x', '0X' or contains trailing
+ * 'h' or 'H' (which indicate hex). Also accepts 'ao' for active optimized
+ * [0], 'an' for active/non-optimized [1], 's' for standby [2], 'u' for
+ * unavailable [3], 'o' for offline [14]. Returns 0 if ok, else error code. */
 static int
 build_state_arr(const char * inp, int * state_arr, int * state_arr_len,
                 int max_arr_len)
@@ -345,7 +343,7 @@ build_state_arr(const char * inp, int * state_arr, int * state_arr_len,
 
     if ((NULL == inp) || (NULL == state_arr) ||
         (NULL == state_arr_len))
-        return 1;
+        return SG_LIB_LOGIC_ERROR;
     lcp = inp;
     in_len = strlen(inp);
     if (0 == in_len)
@@ -353,7 +351,7 @@ build_state_arr(const char * inp, int * state_arr, int * state_arr_len,
     k = strspn(inp, "0123456789aAbBcCdDeEfFhHnNoOsSuUxX,");
     if (in_len != k) {
         pr2serr("%s: error at pos %d\n", __func__, k + 1);
-        return 1;
+        return SG_LIB_SYNTAX_ERROR;
     }
     for (k = 0; k < max_arr_len; ++k) {
         try_num = true;
@@ -380,7 +378,7 @@ build_state_arr(const char * inp, int * state_arr, int * state_arr_len,
             default:
                 pr2serr("%s: expected 'ao', 'an', 'o', 's' or 'u' at pos "
                         "%d\n", __func__, (int)(lcp - inp + 1));
-                return 1;
+                return SG_LIB_SYNTAX_ERROR;
             }
         }
         if (try_num) {
@@ -390,10 +388,10 @@ build_state_arr(const char * inp, int * state_arr, int * state_arr_len,
             else if (-1 == v) {
                 pr2serr("%s: error at pos %d\n", __func__,
                         (int)(lcp - inp + 1));
-                return 1;
+                return SG_LIB_SYNTAX_ERROR;
             } else {
                 pr2serr("%s: expect 0,1,2,3 or 14\n", __func__);
-                return 1;
+                return SG_LIB_SYNTAX_ERROR;
             }
         }
         cp = (char *)strchr(lcp, ',');
@@ -404,7 +402,7 @@ build_state_arr(const char * inp, int * state_arr, int * state_arr_len,
     *state_arr_len = k + 1;
     if (k == max_arr_len) {
         pr2serr("%s: array length exceeded\n", __func__);
-        return 1;
+        return SG_LIB_SYNTAX_ERROR;
     }
     return 0;
 }
@@ -415,13 +413,16 @@ main(int argc, char * argv[])
 {
     bool hex = false;
     bool raw = false;
-    int sg_fd, k, off, res, c, report_len, tgt_port_count;
+    bool verbose_given = false;
+    bool version_given = false;
+    int k, off, res, c, report_len, tgt_port_count;
+    int sg_fd = -1;
     int port_arr_len = 0;
     int verbose = 0;
-    unsigned char reportTgtGrpBuff[TGT_GRP_BUFF_LEN];
-    unsigned char setTgtGrpBuff[TGT_GRP_BUFF_LEN];
-    unsigned char rsp_buff[MX_ALLOC_LEN + 2];
-    unsigned char * bp;
+    uint8_t reportTgtGrpBuff[TGT_GRP_BUFF_LEN];
+    uint8_t setTgtGrpBuff[TGT_GRP_BUFF_LEN];
+    uint8_t rsp_buff[MX_ALLOC_LEN + 2];
+    uint8_t * bp;
     struct tgtgrp tgtGrpState[256], *tgtStatePtr;
     int state = -1;
     const char * state_arg = NULL;
@@ -478,11 +479,12 @@ main(int argc, char * argv[])
             state = TPGS_STATE_UNAVAILABLE;
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr("Version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
             usage();
@@ -501,19 +503,39 @@ main(int argc, char * argv[])
             return SG_LIB_SYNTAX_ERROR;
         }
     }
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr("Version: %s\n", version_str);
+        return 0;
+    }
 
     if (state_arg) {
-        if (build_state_arr(state_arg, state_arr, &state_arr_len,
-                            MAX_PORT_LIST_ARR_LEN)) {
+        if ((ret = build_state_arr(state_arg, state_arr, &state_arr_len,
+                                   MAX_PORT_LIST_ARR_LEN))) {
             usage();
-            return SG_LIB_SYNTAX_ERROR;
+            return ret;
         }
     }
     if (tp_arg) {
-        if (build_port_arr(tp_arg, port_arr, &port_arr_len,
-                           MAX_PORT_LIST_ARR_LEN)) {
+        if ((ret = build_port_arr(tp_arg, port_arr, &port_arr_len,
+                                  MAX_PORT_LIST_ARR_LEN))) {
             usage();
-            return SG_LIB_SYNTAX_ERROR;
+            return ret;
         }
     }
     if ((state >= 0) && (state_arr_len > 0)) {
@@ -551,7 +573,7 @@ main(int argc, char * argv[])
     if (port_arr_len != state_arr_len) {
         pr2serr("'state=' and '--tp=' lists mismatched\n");
         usage();
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CONTRADICT;
     }
 
     if (NULL == device_name) {
@@ -561,8 +583,11 @@ main(int argc, char * argv[])
     }
     sg_fd = sg_cmds_open_device(device_name, false /* rw */, verbose);
     if (sg_fd < 0) {
-        pr2serr("open error: %s: %s\n", device_name, safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        if (verbose)
+            pr2serr("open error: %s: %s\n", device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
+        goto err_out;
     }
 
     if (0 == port_arr_len) {
@@ -575,7 +600,7 @@ main(int argc, char * argv[])
                         "response\n");
                 if (verbose) {
                     pr2serr("First 32 bytes of bad response\n");
-                    dStrHexErr((const char *)rsp_buff, 32, 0);
+                    hex2stderr(rsp_buff, 32, 0);
                 }
                 return SG_LIB_CAT_MALFORMED;
             }
@@ -610,7 +635,7 @@ main(int argc, char * argv[])
                 report_len = (int)sizeof(reportTgtGrpBuff);
             }
             if (raw) {
-                dStrRaw((const char *)reportTgtGrpBuff, report_len);
+                dStrRaw(reportTgtGrpBuff, report_len);
                 goto err_out;
             }
             if (verbose)
@@ -618,7 +643,7 @@ main(int argc, char * argv[])
             if (hex) {
                 if (verbose)
                     printf("\nOutput response in hex:\n");
-                dStrHex((const char *)reportTgtGrpBuff, report_len, 1);
+                hex2stdout(reportTgtGrpBuff, report_len, 1);
                 goto err_out;
             }
             memset(tgtGrpState, 0, sizeof(struct tgtgrp) * 256);
@@ -683,11 +708,18 @@ main(int argc, char * argv[])
     }
 
 err_out:
-    res = sg_cmds_close_device(sg_fd);
-    if (res < 0) {
-        pr2serr("close error: %s\n", safe_strerror(-res));
-        if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+    if (sg_fd >= 0) {
+        res = sg_cmds_close_device(sg_fd);
+        if (res < 0) {
+            pr2serr("close error: %s\n", safe_strerror(-res));
+            if (0 == ret)
+                ret = sg_convert_errno(-res);
+        }
+    }
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_stpg failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

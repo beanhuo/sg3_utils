@@ -2,7 +2,7 @@
 #define SG_LIB_DATA_H
 
 /*
- * Copyright (c) 2007-2017 Douglas Gilbert.
+ * Copyright (c) 2007-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -48,23 +48,42 @@ extern "C" {
 
 
 
+struct sg_lib_simple_value_name_t {
+    int value;
+    const char * name;
+};
+
 struct sg_lib_value_name_t {
     int value;
     int peri_dev_type; /* 0 -> SPC and/or PDT_DISK, >0 -> PDT */
     const char * name;
 };
 
+struct sg_value_2names_t {
+    int value;
+    const char * name;
+    const char * name2;
+};
+
 struct sg_lib_asc_ascq_t {
-    unsigned char asc;          /* additional sense code */
-    unsigned char ascq;         /* additional sense code qualifier */
+    uint8_t asc;          /* additional sense code */
+    uint8_t ascq;         /* additional sense code qualifier */
     const char * text;
 };
 
 struct sg_lib_asc_ascq_range_t {
-    unsigned char asc;  /* additional sense code (ASC) */
-    unsigned char ascq_min;     /* ASCQ minimum in range */
-    unsigned char ascq_max;     /* ASCQ maximum in range */
+    uint8_t asc;          /* additional sense code (ASC) */
+    uint8_t ascq_min;     /* ASCQ minimum in range */
+    uint8_t ascq_max;     /* ASCQ maximum in range */
     const char * text;
+};
+
+/* First use: SCSI status, sense_key, asc, ascq tuple */
+struct sg_lib_4tuple_u8 {
+    uint8_t t1;
+    uint8_t t2;
+    uint8_t t3;
+    uint8_t t4;
 };
 
 
@@ -98,6 +117,12 @@ extern const char * sg_lib_pdt_strs[];
 extern const char * sg_lib_transport_proto_strs[];
 extern int sg_lib_pdt_decay_arr[];
 
+extern struct sg_lib_simple_value_name_t sg_lib_nvme_admin_cmd_arr[];
+extern struct sg_lib_simple_value_name_t sg_lib_nvme_nvm_cmd_arr[];
+extern struct sg_lib_value_name_t sg_lib_nvme_cmd_status_arr[];
+extern struct sg_lib_4tuple_u8 sg_lib_scsi_status_sense_arr[];
+
+extern struct sg_value_2names_t sg_exit_str_arr[];
 
 #ifdef __cplusplus
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2017 Douglas Gilbert.
+ * Copyright (c) 2009-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -12,6 +12,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <string.h>
+#include <errno.h>
 #include <getopt.h>
 #define __STDC_FORMAT_MACROS 1
 #include <inttypes.h>
@@ -32,7 +33,7 @@
  * device.
  */
 
-static const char * version_str = "1.12 20171005";
+static const char * version_str = "1.17 20180626";
 
 #ifndef UINT32_MAX
 #define UINT32_MAX ((uint32_t)-1)
@@ -41,8 +42,7 @@ static const char * version_str = "1.12 20171005";
 #define MAX_GLBAS_BUFF_LEN (1024 * 1024)
 #define DEF_GLBAS_BUFF_LEN 24
 
-static unsigned char glbasBuff[DEF_GLBAS_BUFF_LEN];
-static unsigned char * glbasBuffp = glbasBuff;
+static uint8_t glbasBuff[DEF_GLBAS_BUFF_LEN];
 
 
 static struct option long_options[] = {
@@ -114,11 +114,11 @@ usage()
 }
 
 static void
-dStrRaw(const char* str, int len)
+dStrRaw(const char * str, int len)
 {
     int k;
 
-    for (k = 0 ; k < len; ++k)
+    for (k = 0; k < len; ++k)
         printf("%c", str[k]);
 }
 
@@ -126,7 +126,7 @@ dStrRaw(const char* str, int len)
  * the number of blocks and returns the provisioning status, -1 for error.
  */
 static int
-decode_lba_status_desc(const unsigned char * bp, uint64_t * slbap,
+decode_lba_status_desc(const uint8_t * bp, uint64_t * slbap,
                        uint32_t * blocksp, uint8_t * add_statusp)
 {
     uint32_t blocks;
@@ -149,26 +149,30 @@ decode_lba_status_desc(const unsigned char * bp, uint64_t * slbap,
 int
 main(int argc, char * argv[])
 {
-    int sg_fd, k, j, res, c, rlen, num_descs, completion_cond;
-    int do_brief = 0;
-    int do_hex = 0;
-    int64_t ll;
-    uint64_t lba = 0;
-    uint64_t d_lba = 0;
-    uint32_t d_blocks = 0;
-    uint32_t element_id = 0;
-    uint32_t scan_len = 0;
-    int maxlen = DEF_GLBAS_BUFF_LEN;
-    int rt = 0;
-    int verbose = 0;
     bool do_16 = false;
     bool do_32 = false;
     bool do_raw = false;
     bool o_readonly = false;
-    const char * device_name = NULL;
-    const unsigned char * bp;
+    bool verbose_given = false;
+    bool version_given = false;
+    int sg_fd, k, j, res, c, rlen, num_descs, completion_cond;
+    int do_brief = 0;
+    int do_hex = 0;
     int ret = 0;
-    uint8_t add_status;
+    int maxlen = DEF_GLBAS_BUFF_LEN;
+    int rt = 0;
+    int verbose = 0;
+    uint8_t add_status = 0;     /* keep gcc quiet */
+    uint64_t d_lba = 0;
+    uint32_t d_blocks = 0;
+    uint32_t element_id = 0;
+    uint32_t scan_len = 0;
+    int64_t ll;
+    uint64_t lba = 0;
+    const char * device_name = NULL;
+    const uint8_t * bp;
+    uint8_t * glbasBuffp = glbasBuff;
+    uint8_t * free_glbasBuffp = NULL;
 
     while (1) {
         int option_index = 0;
@@ -242,11 +246,12 @@ main(int argc, char * argv[])
             do_32 = true;
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr("version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
             usage();
@@ -265,16 +270,39 @@ main(int argc, char * argv[])
             return SG_LIB_SYNTAX_ERROR;
         }
     }
+
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr("version: %s\n", version_str);
+        return 0;
+    }
+
     if (NULL == device_name) {
         pr2serr("missing device name!\n");
         usage();
         return SG_LIB_SYNTAX_ERROR;
     }
     if (maxlen > DEF_GLBAS_BUFF_LEN) {
-        glbasBuffp = (unsigned char *)calloc(maxlen, 1);
+        glbasBuffp = (uint8_t *)sg_memalign(maxlen, 0, &free_glbasBuffp,
+                                            verbose > 3);
         if (NULL == glbasBuffp) {
             pr2serr("unable to allocate %d bytes on heap\n", maxlen);
-            return SG_LIB_SYNTAX_ERROR;
+            return sg_convert_errno(ENOMEM);
         }
     }
     if (do_raw) {
@@ -301,7 +329,7 @@ main(int argc, char * argv[])
     sg_fd = sg_cmds_open_device(device_name, o_readonly, verbose);
     if (sg_fd < 0) {
         pr2serr("open error: %s: %s\n", device_name, safe_strerror(-sg_fd));
-        ret = SG_LIB_FILE_ERROR;
+        ret = sg_convert_errno(-sg_fd);
         goto free_buff;
     }
 
@@ -327,7 +355,7 @@ main(int argc, char * argv[])
             goto the_end;
         }
         if (do_hex) {
-            dStrHex((const char *)glbasBuffp, k, 1);
+            hex2stdout(glbasBuffp, k, 1);
             goto the_end;
         }
         if (maxlen < 4) {
@@ -356,7 +384,7 @@ main(int argc, char * argv[])
                                          &add_status);
             if ((res < 0) || (res > 15)) {
                 pr2serr("first LBA status descriptor returned %d ??\n", res);
-                ret = SG_LIB_CAT_OTHER;
+                ret = SG_LIB_LOGIC_ERROR;
                 goto the_end;
             }
             if ((lba < d_lba) || (lba >= (d_lba + d_blocks))) {
@@ -474,10 +502,15 @@ the_end:
     if (res < 0) {
         pr2serr("close error: %s\n", safe_strerror(-res));
         if (0 == ret)
-            ret = SG_LIB_FILE_ERROR;
+            ret = sg_convert_errno(-res);
     }
 free_buff:
-    if (glbasBuffp && (glbasBuffp != glbasBuff))
-        free(glbasBuffp);
+    if (free_glbasBuffp)
+        free(free_glbasBuffp);
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_get_lba_status failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' or '-vv' for "
+                    "more information\n");
+    }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

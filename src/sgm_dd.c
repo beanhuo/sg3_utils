@@ -1,7 +1,7 @@
 /* A utility program for copying files. Specialised for "files" that
  * represent devices that understand the SCSI command set.
  *
- * Copyright (C) 1999 - 2017 D. Gilbert and P. Allworth
+ * Copyright (C) 1999 - 2018 D. Gilbert and P. Allworth
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2, or (at your option)
@@ -26,7 +26,7 @@
    then only the read side will be mmap-ed, while the write side will
    use normal IO.
 
-   This version is designed for the linux kernel 2.4, 2.6 and 3 series.
+   This version is designed for the linux kernel 2.4, 2.6, 3 and 4 series.
 */
 
 #define _XOPEN_SOURCE 600
@@ -66,7 +66,7 @@
 #include "sg_pr2serr.h"
 
 
-static const char * version_str = "1.50 20171023";
+static const char * version_str = "1.59 20180724";
 
 #define DEF_BLOCK_SIZE 512
 #define DEF_BLOCKS_PER_TRANSFER 128
@@ -76,7 +76,6 @@ static const char * version_str = "1.50 20171023";
 
 #define ME "sgm_dd: "
 
-/* #define SG_DEBUG */
 
 #ifndef SG_FLAG_MMAP_IO
 #define SG_FLAG_MMAP_IO 4
@@ -113,6 +112,7 @@ static int in_partial = 0;
 static int64_t out_full = 0;
 static int out_partial = 0;
 static int verbose = 0;
+static int dry_run = 0;
 
 static bool do_time = false;
 static bool start_tm_valid = false;
@@ -240,19 +240,19 @@ dd_filetype_str(int ft, char * buff)
     int off = 0;
 
     if (FT_DEV_NULL & ft)
-        off += snprintf(buff + off, 32, "null device ");
+        off += sg_scnpr(buff + off, 32, "null device ");
     if (FT_SG & ft)
-        off += snprintf(buff + off, 32, "SCSI generic (sg) device ");
+        off += sg_scnpr(buff + off, 32, "SCSI generic (sg) device ");
     if (FT_BLOCK & ft)
-        off += snprintf(buff + off, 32, "block device ");
+        off += sg_scnpr(buff + off, 32, "block device ");
     if (FT_ST & ft)
-        off += snprintf(buff + off, 32, "SCSI tape device ");
+        off += sg_scnpr(buff + off, 32, "SCSI tape device ");
     if (FT_RAW & ft)
-        off += snprintf(buff + off, 32, "raw device ");
+        off += sg_scnpr(buff + off, 32, "raw device ");
     if (FT_OTHER & ft)
-        off += snprintf(buff + off, 32, "other (perhaps ordinary file) ");
+        off += sg_scnpr(buff + off, 32, "other (perhaps ordinary file) ");
     if (FT_ERROR & ft)
-        snprintf(buff + off, 32, "unable to 'stat' file ");
+        sg_scnpr(buff + off, 32, "unable to 'stat' file ");
     return buff;
 }
 
@@ -266,7 +266,8 @@ usage()
             "               [--help] [--version]\n\n");
     pr2serr("               [bpt=BPT] [cdbsz=6|10|12|16] [dio=0|1] "
             "[fua=0|1|2|3]\n"
-            "               [sync=0|1] [time=0|1] [verbose=VERB]\n\n"
+            "               [sync=0|1] [time=0|1] [verbose=VERB] "
+            "[--dry-run] [--verbose]\n\n"
             "  where:\n"
             "    bpt         is blocks_per_transfer (default is 128)\n"
             "    bs          must be device block size (default 512)\n"
@@ -295,8 +296,10 @@ usage()
             "throughput\n"
             "    verbose     0->quiet(def), 1->some noise, 2->more noise, "
             "etc\n"
-            "    --help      print usage message then exit\n"
-            "    --version   print version information then exit\n\n"
+            "    --dry-run|-d    prepare but bypass copy/read\n"
+            "    --help|-h       print usage message then exit\n"
+            "    --verbose|-v    increase verbosity\n"
+            "    --version|-V    print version information then exit\n\n"
             "Copy from IFILE to OFILE, similar to dd command\n"
             "specialized for SCSI devices for which mmap-ed IO attempted\n");
 }
@@ -307,7 +310,7 @@ scsi_read_capacity(int sg_fd, int64_t * num_sect, int * sect_sz)
 {
     int res, verb;
     unsigned int ui;
-    unsigned char rcBuff[RCAP16_REPLY_LEN];
+    uint8_t rcBuff[RCAP16_REPLY_LEN];
 
     verb = (verbose ? verbose - 1: 0);
     res = sg_ll_readcap_10(sg_fd, 0, 0, rcBuff, READ_CAP_REPLY_LEN, false,
@@ -382,7 +385,7 @@ read_blkdev_capacity(int sg_fd, int64_t * num_sect, int * sect_sz)
 }
 
 static int
-sg_build_scsi_cdb(unsigned char * cdbp, int cdb_sz, unsigned int blocks,
+sg_build_scsi_cdb(uint8_t * cdbp, int cdb_sz, unsigned int blocks,
                   int64_t start_block, bool write_true, bool fua, bool dpo)
 {
     int sz_ind;
@@ -397,10 +400,10 @@ sg_build_scsi_cdb(unsigned char * cdbp, int cdb_sz, unsigned int blocks,
     switch (cdb_sz) {
     case 6:
         sz_ind = 0;
-        cdbp[0] = (unsigned char)(write_true ? wr_opcode[sz_ind] :
+        cdbp[0] = (uint8_t)(write_true ? wr_opcode[sz_ind] :
                                                rd_opcode[sz_ind]);
         sg_put_unaligned_be24(0x1fffff & start_block, cdbp + 1);
-        cdbp[4] = (256 == blocks) ? 0 : (unsigned char)blocks;
+        cdbp[4] = (256 == blocks) ? 0 : (uint8_t)blocks;
         if (blocks > 256) {
             pr2serr(ME "for 6 byte commands, maximum number of blocks is "
                     "256\n");
@@ -419,7 +422,7 @@ sg_build_scsi_cdb(unsigned char * cdbp, int cdb_sz, unsigned int blocks,
         break;
     case 10:
         sz_ind = 1;
-        cdbp[0] = (unsigned char)(write_true ? wr_opcode[sz_ind] :
+        cdbp[0] = (uint8_t)(write_true ? wr_opcode[sz_ind] :
                                                rd_opcode[sz_ind]);
         sg_put_unaligned_be32((uint32_t)start_block, cdbp + 2);
         sg_put_unaligned_be16((uint16_t)blocks, cdbp + 7);
@@ -431,14 +434,14 @@ sg_build_scsi_cdb(unsigned char * cdbp, int cdb_sz, unsigned int blocks,
         break;
     case 12:
         sz_ind = 2;
-        cdbp[0] = (unsigned char)(write_true ? wr_opcode[sz_ind] :
+        cdbp[0] = (uint8_t)(write_true ? wr_opcode[sz_ind] :
                                                rd_opcode[sz_ind]);
         sg_put_unaligned_be32((uint32_t)start_block, cdbp + 2);
         sg_put_unaligned_be32((uint32_t)blocks, cdbp + 6);
         break;
     case 16:
         sz_ind = 3;
-        cdbp[0] = (unsigned char)(write_true ? wr_opcode[sz_ind] :
+        cdbp[0] = (uint8_t)(write_true ? wr_opcode[sz_ind] :
                                                rd_opcode[sz_ind]);
         sg_put_unaligned_be64((uint64_t)start_block, cdbp + 2);
         sg_put_unaligned_be32((uint32_t)blocks, cdbp + 10);
@@ -454,12 +457,12 @@ sg_build_scsi_cdb(unsigned char * cdbp, int cdb_sz, unsigned int blocks,
 /* Returns 0 -> successful, various SG_LIB_CAT_* positive values,
  * -2 -> recoverable (ENOMEM), -1 -> unrecoverable error */
 static int
-sg_read(int sg_fd, unsigned char * buff, int blocks, int64_t from_block,
+sg_read(int sg_fd, uint8_t * buff, int blocks, int64_t from_block,
         int bs, int cdbsz, bool fua, bool dpo, bool do_mmap)
 {
     int k, res;
-    unsigned char rdCmd[MAX_SCSI_CDBSZ];
-    unsigned char senseBuff[SENSE_BUFF_LEN];
+    uint8_t rdCmd[MAX_SCSI_CDBSZ];
+    uint8_t senseBuff[SENSE_BUFF_LEN];
     struct sg_io_hdr io_hdr;
 
     if (sg_build_scsi_cdb(rdCmd, cdbsz, blocks, from_block, false, fua,
@@ -536,7 +539,7 @@ sg_read(int sg_fd, unsigned char * buff, int blocks, int64_t from_block,
         return res;
     }
     sum_of_resids += io_hdr.resid;
-#ifdef SG_DEBUG
+#ifdef DEBUG
     pr2serr("duration=%u ms\n", io_hdr.duration);
 #endif
     return 0;
@@ -545,12 +548,12 @@ sg_read(int sg_fd, unsigned char * buff, int blocks, int64_t from_block,
 /* Returns 0 -> successful, various SG_LIB_CAT_* positive values,
  * -2 -> recoverable (ENOMEM), -1 -> unrecoverable error */
 static int
-sg_write(int sg_fd, unsigned char * buff, int blocks, int64_t to_block,
+sg_write(int sg_fd, uint8_t * buff, int blocks, int64_t to_block,
          int bs, int cdbsz, bool fua, bool dpo, bool do_mmap, bool * diop)
 {
     int k, res;
-    unsigned char wrCmd[MAX_SCSI_CDBSZ];
-    unsigned char senseBuff[SENSE_BUFF_LEN];
+    uint8_t wrCmd[MAX_SCSI_CDBSZ];
+    uint8_t senseBuff[SENSE_BUFF_LEN];
     struct sg_io_hdr io_hdr;
 
     if (sg_build_scsi_cdb(wrCmd, cdbsz, blocks, to_block, true, fua, dpo)) {
@@ -677,11 +680,24 @@ process_flags(const char * arg, struct flags_t * fp)
     return 0;
 }
 
+/* Returns the number of times 'ch' is found in string 's' given the
+ * string's length. */
+static int
+num_chs_in_str(const char * s, int slen, int ch)
+{
+    int res = 0;
+
+    while (--slen >= 0) {
+        if (ch == s[slen])
+            ++res;
+    }
+    return res;
+}
+
 
 #define STR_SZ 1024
 #define INOUTF_SZ 512
-#define EBUFF_SZ 512
-
+#define EBUFF_SZ 768
 
 int
 main(int argc, char * argv[])
@@ -690,8 +706,9 @@ main(int argc, char * argv[])
     bool cdbsz_given = false;
     bool do_coe = false;     /* dummy, just accept + ignore */
     bool do_sync = false;
-    int res, k, t, infd, outfd, blocks, n, flags;
-    int blocks_per;
+    bool verbose_given = false;
+    bool version_given = false;
+    int res, k, t, infd, outfd, blocks, n, flags, blocks_per, err, keylen;
     int bpt = DEF_BLOCKS_PER_TRANSFER;
     int ibs = 0;
     int in_res_sz = 0;
@@ -712,9 +729,9 @@ main(int argc, char * argv[])
     int64_t seek = 0;
     char * buf;
     char * key;
-    unsigned char * wrkPos;
-    unsigned char * wrkBuff = NULL;
-    unsigned char * wrkMmap = NULL;
+    uint8_t * wrkPos;
+    uint8_t * wrkBuff = NULL;
+    uint8_t * wrkMmap = NULL;
     char inf[INOUTF_SZ];
     char str[STR_SZ];
     char outf[INOUTF_SZ];
@@ -735,13 +752,14 @@ main(int argc, char * argv[])
 
     for (k = 1; k < argc; k++) {
         if (argv[k])
-            strncpy(str, argv[k], STR_SZ);
+            snprintf(str, STR_SZ, "%s", argv[k]);
         else
             continue;
         for (key = str, buf = key; *buf && *buf != '=';)
             buf++;
         if (*buf)
             *buf++ = '\0';
+        keylen = strlen(key);
         if (0 == strcmp(key,"bpt")) {
             bpt = sg_get_num(buf);
             if (-1 == bpt) {
@@ -787,9 +805,9 @@ main(int argc, char * argv[])
         } else if (strcmp(key,"if") == 0) {
             if ('\0' != inf[0]) {
                 pr2serr("Second 'if=' argument??\n");
-                return SG_LIB_SYNTAX_ERROR;
+                return SG_LIB_CONTRADICT;
             } else
-                strncpy(inf, buf, INOUTF_SZ);
+                snprintf(inf, INOUTF_SZ, "%s", buf);
         } else if (0 == strcmp(key, "iflag")) {
             if (process_flags(buf, &in_flags)) {
                 pr2serr(ME "bad argument to 'iflag'\n");
@@ -798,9 +816,9 @@ main(int argc, char * argv[])
         } else if (strcmp(key,"of") == 0) {
             if ('\0' != outf[0]) {
                 pr2serr("Second 'of=' argument??\n");
-                return SG_LIB_SYNTAX_ERROR;
+                return SG_LIB_CONTRADICT;
             } else
-                strncpy(outf, buf, INOUTF_SZ);
+                snprintf(outf, INOUTF_SZ, "%s", buf);
         } else if (0 == strcmp(key, "oflag")) {
             if (process_flags(buf, &out_flags)) {
                 pr2serr(ME "bad argument to 'oflag'\n");
@@ -830,21 +848,66 @@ main(int argc, char * argv[])
             do_time = sg_get_num(buf);
         else if (0 == strncmp(key, "verb", 4))
             verbose = sg_get_num(buf);
-        else if ((0 == strncmp(key, "--help", 7)) ||
-                 (0 == strcmp(key, "-h")) || (0 == strcmp(key, "-?"))) {
+        else if ((keylen > 1) && ('-' == key[0]) && ('-' != key[1])) {
+            res = 0;
+            n = num_chs_in_str(key + 1, keylen - 1, 'd');
+            dry_run += n;
+            res += n;
+            n = num_chs_in_str(key + 1, keylen - 1, 'h');
+            if (n > 0) {
+                usage();
+                return 0;
+            }
+            n = num_chs_in_str(key + 1, keylen - 1, 'v');
+            verbose += n;
+            res += n;
+            n = num_chs_in_str(key + 1, keylen - 1, 'V');
+            if (n > 0)
+                version_given = true;
+            res += n;
+            if (res < (keylen - 1)) {
+                pr2serr("Unrecognised short option in '%s', try '--help'\n",
+                        key);
+                return SG_LIB_SYNTAX_ERROR;
+            }
+        } else if ((0 == strncmp(key, "--dry-run", 9)) ||
+                 (0 == strncmp(key, "--dry_run", 9)))
+            ++dry_run;
+        else if ((0 == strncmp(key, "--help", 6)) ||
+                 (0 == strcmp(key, "-?"))) {
             usage();
             return 0;
-        } else if ((0 == strncmp(key, "--vers", 6)) ||
-                   (0 == strcmp(key, "-V"))) {
-            pr2serr(ME ": %s\n", version_str);
-            return 0;
-        }
+        } else if (0 == strncmp(key, "--verb", 6))
+            ++verbose;
+        else if (0 == strncmp(key, "--vers", 6))
+            version_given = true;
         else {
             pr2serr("Unrecognized option '%s'\n", key);
             pr2serr("For more information use '--help'\n");
             return SG_LIB_SYNTAX_ERROR;
         }
     }
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr(ME ": %s\n", version_str);
+        return 0;
+    }
+
     if (blk_sz <= 0) {
         blk_sz = DEF_BLOCK_SIZE;
         pr2serr("Assume default 'bs' (block size) of %d bytes\n", blk_sz);
@@ -852,15 +915,15 @@ main(int argc, char * argv[])
     if ((ibs && (ibs != blk_sz)) || (obs && (obs != blk_sz))) {
         pr2serr("If 'ibs' or 'obs' given must be same as 'bs'\n");
         usage();
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CONTRADICT;
     }
     if ((skip < 0) || (seek < 0)) {
         pr2serr("skip and seek cannot be negative\n");
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CONTRADICT;
     }
     if (out_flags.append && (seek > 0)) {
         pr2serr("Can't use both append and seek switches\n");
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CONTRADICT;
     }
     if (bpt < 1) {
         pr2serr("bpt must be greater than 0\n");
@@ -872,7 +935,7 @@ main(int argc, char * argv[])
     if ((blk_sz >= 2048) && (! bpt_given))
         bpt = DEF_BLOCKS_PER_2048TRANSFER;
 
-#ifdef SG_DEBUG
+#ifdef DEBUG
     pr2serr(ME "if=%s skip=%" PRId64 " of=%s seek=%" PRId64 " count=%" PRId64
             "\n", inf, skip, outf, seek, dd_count);
 #endif
@@ -904,10 +967,11 @@ main(int argc, char * argv[])
             if (in_flags.dsync)
                 flags |= O_SYNC;
             if ((infd = open(inf, flags)) < 0) {
+                err = errno;
                 snprintf(ebuff, EBUFF_SZ,
                          ME "could not open %s for sg reading", inf);
                 perror(ebuff);
-                return SG_LIB_FILE_ERROR;
+                return sg_convert_errno(err);
             }
             res = ioctl(infd, SG_GET_VERSION_NUM, &t);
             if ((res < 0) || (t < 30122)) {
@@ -918,24 +982,27 @@ main(int argc, char * argv[])
             if (0 != (in_res_sz % psz)) /* round up to next page */
                 in_res_sz = ((in_res_sz / psz) + 1) * psz;
             if (ioctl(infd, SG_GET_RESERVED_SIZE, &t) < 0) {
+                err = errno;
                 perror(ME "SG_GET_RESERVED_SIZE error");
-                return SG_LIB_FILE_ERROR;
+                return sg_convert_errno(err);
             }
             if (t < MIN_RESERVED_SIZE)
                 t = MIN_RESERVED_SIZE;
             if (in_res_sz > t) {
                 if (ioctl(infd, SG_SET_RESERVED_SIZE, &in_res_sz) < 0) {
+                    err = errno;
                     perror(ME "SG_SET_RESERVED_SIZE error");
-                    return SG_LIB_FILE_ERROR;
+                    return sg_convert_errno(err);
                 }
             }
-            wrkMmap = (unsigned char *)mmap(NULL, in_res_sz,
+            wrkMmap = (uint8_t *)mmap(NULL, in_res_sz,
                                  PROT_READ | PROT_WRITE, MAP_SHARED, infd, 0);
             if (MAP_FAILED == wrkMmap) {
+                err = errno;
                 snprintf(ebuff, EBUFF_SZ,
                          ME "error using mmap() on file: %s", inf);
                 perror(ebuff);
-                return SG_LIB_FILE_ERROR;
+                return sg_convert_errno(err);
             }
         } else {
             flags = O_RDONLY;
@@ -946,20 +1013,22 @@ main(int argc, char * argv[])
             if (in_flags.dsync)
                 flags |= O_SYNC;
             if ((infd = open(inf, flags)) < 0) {
+                err = errno;
                 snprintf(ebuff, EBUFF_SZ,
                          ME "could not open %s for reading", inf);
                 perror(ebuff);
-                return SG_LIB_FILE_ERROR;
+                return sg_convert_errno(err);
             }
             else if (skip > 0) {
                 off64_t offset = skip;
 
                 offset *= blk_sz;       /* could exceed 32 bits here! */
                 if (lseek64(infd, offset, SEEK_SET) < 0) {
+                    err = errno;
                     snprintf(ebuff, EBUFF_SZ, ME "couldn't skip to "
                              "required position on %s", inf);
                     perror(ebuff);
-                    return SG_LIB_FILE_ERROR;
+                    return sg_convert_errno(err);
                 }
                 if (verbose)
                     pr2serr("  >> skip: lseek64 SEEK_SET, byte offset=0x%"
@@ -987,10 +1056,11 @@ main(int argc, char * argv[])
             if (out_flags.dsync)
                 flags |= O_SYNC;
             if ((outfd = open(outf, flags)) < 0) {
+                err = errno;
                 snprintf(ebuff, EBUFF_SZ, ME "could not open %s for "
                          "sg writing", outf);
                 perror(ebuff);
-                return SG_LIB_FILE_ERROR;
+                return sg_convert_errno(err);
             }
             res = ioctl(outfd, SG_GET_VERSION_NUM, &t);
             if ((res < 0) || (t < 30122)) {
@@ -998,26 +1068,29 @@ main(int argc, char * argv[])
                 return SG_LIB_FILE_ERROR;
             }
             if (ioctl(outfd, SG_GET_RESERVED_SIZE, &t) < 0) {
+                err = errno;
                 perror(ME "SG_GET_RESERVED_SIZE error");
-                return SG_LIB_FILE_ERROR;
+                return sg_convert_errno(err);
             }
            if (t < MIN_RESERVED_SIZE)
                 t = MIN_RESERVED_SIZE;
             out_res_sz = blk_sz * bpt;
             if (out_res_sz > t) {
                 if (ioctl(outfd, SG_SET_RESERVED_SIZE, &out_res_sz) < 0) {
+                    err = errno;
                     perror(ME "SG_SET_RESERVED_SIZE error");
-                    return SG_LIB_FILE_ERROR;
+                    return sg_convert_errno(err);
                 }
             }
             if (NULL == wrkMmap) {
-                wrkMmap = (unsigned char *)mmap(NULL, out_res_sz,
+                wrkMmap = (uint8_t *)mmap(NULL, out_res_sz,
                                 PROT_READ | PROT_WRITE, MAP_SHARED, outfd, 0);
                 if (MAP_FAILED == wrkMmap) {
+                    err = errno;
                     snprintf(ebuff, EBUFF_SZ,
                              ME "error using mmap() on file: %s", outf);
                     perror(ebuff);
-                    return SG_LIB_FILE_ERROR;
+                    return sg_convert_errno(err);
                 }
             }
         }
@@ -1035,18 +1108,20 @@ main(int argc, char * argv[])
                 if (out_flags.append)
                     flags |= O_APPEND;
                 if ((outfd = open(outf, flags, 0666)) < 0) {
+                    err = errno;
                     snprintf(ebuff, EBUFF_SZ,
                              ME "could not open %s for writing", outf);
                     perror(ebuff);
-                    return SG_LIB_FILE_ERROR;
+                    return sg_convert_errno(err);
                 }
             }
             else {
                 if ((outfd = open(outf, O_WRONLY)) < 0) {
+                    err = errno;
                     snprintf(ebuff, EBUFF_SZ, ME "could not open %s "
                              "for raw writing", outf);
                     perror(ebuff);
-                    return SG_LIB_FILE_ERROR;
+                    return sg_convert_errno(err);
                 }
             }
             if (seek > 0) {
@@ -1054,10 +1129,11 @@ main(int argc, char * argv[])
 
                 offset *= blk_sz;       /* could exceed 32 bits here! */
                 if (lseek64(outfd, offset, SEEK_SET) < 0) {
+                    err = errno;
                     snprintf(ebuff, EBUFF_SZ, ME "couldn't seek to "
                              "required position on %s", outf);
                     perror(ebuff);
-                    return SG_LIB_FILE_ERROR;
+                    return sg_convert_errno(err);
                 }
                 if (verbose)
                     pr2serr("   >> seek: lseek64 SEEK_SET, byte offset=0x%"
@@ -1069,7 +1145,7 @@ main(int argc, char * argv[])
         pr2serr("Won't default both IFILE to stdin _and_ OFILE to as "
                 "stdout\n");
         pr2serr("For more information use '--help'\n");
-        return SG_LIB_SYNTAX_ERROR;
+        return SG_LIB_CONTRADICT;
     }
     if (dd_count < 0) {
         in_num_sect = -1;
@@ -1130,7 +1206,7 @@ main(int argc, char * argv[])
         }
         if (out_num_sect > seek)
             out_num_sect -= seek;
-#ifdef SG_DEBUG
+#ifdef DEBUG
         pr2serr("Start of loop, count=%" PRId64 ", in_num_sect=%" PRId64 ", "
                 "out_num_sect=%" PRId64 "\n", dd_count, in_num_sect,
                 out_num_sect);
@@ -1187,31 +1263,22 @@ main(int argc, char * argv[])
     if (wrkMmap) {
         wrkPos = wrkMmap;
     } else {
-        if ((FT_RAW == in_type) || (FT_RAW == out_type)) {
-            wrkBuff = (unsigned char *)malloc(blk_sz * bpt + psz);
-            if (NULL == wrkBuff) {
-                pr2serr("Not enough user memory for raw\n");
-                return SG_LIB_FILE_ERROR;
-            }
-            /* perhaps use posix_memalign() instead */
-            wrkPos = (unsigned char *)(((uintptr_t)wrkBuff + psz - 1) &
-                                       (~(psz - 1)));
-        }
-        else {
-            wrkBuff = (unsigned char *)malloc(blk_sz * bpt);
-            if (NULL == wrkBuff) {
-                pr2serr("Not enough user memory\n");
-                return SG_LIB_FILE_ERROR;
-            }
-            wrkPos = wrkBuff;
+        wrkPos = (uint8_t *)sg_memalign(blk_sz * bpt, 0, &wrkBuff,
+                                        verbose > 3);
+        if (NULL == wrkPos) {
+            pr2serr("Not enough user memory\n");
+            return sg_convert_errno(ENOMEM);
         }
     }
 
     blocks_per = bpt;
-#ifdef SG_DEBUG
+#ifdef DEBUG
     pr2serr("Start of loop, count=%" PRId64 ", blocks_per=%d\n", dd_count,
             blocks_per);
 #endif
+    if (dry_run > 0)
+        goto fini;
+
     if (do_time) {
         start_tm.tv_sec = 0;
         start_tm.tv_usec = 0;
@@ -1346,13 +1413,14 @@ main(int argc, char * argv[])
         }
     }
 
+fini:
     if (wrkBuff)
         free(wrkBuff);
     if (STDIN_FILENO != infd)
         close(infd);
     if ((STDOUT_FILENO != outfd) && (FT_DEV_NULL != out_type))
         close(outfd);
-    if (0 != dd_count) {
+    if ((0 != dd_count) && (0 == dry_run)) {
         pr2serr("Some error occurred,");
         if (0 == ret)
             ret = SG_LIB_CAT_OTHER;

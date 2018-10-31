@@ -1,5 +1,5 @@
 /*
-*  Copyright (c) 2012-2017, Kaminario Technologies LTD
+*  Copyright (c) 2012-2018, Kaminario Technologies LTD
 *  All rights reserved.
 *  Redistribution and use in source and binary forms, with or without
 *  modification, are permitted provided that the following conditions are met:
@@ -54,7 +54,7 @@
 #include "sg_unaligned.h"
 #include "sg_pr2serr.h"
 
-static const char * version_str = "1.19 20171020";
+static const char * version_str = "1.25 20180625";
 
 #define DEF_BLOCK_SIZE 512
 #define DEF_NUM_BLOCKS (1)
@@ -72,7 +72,9 @@ static struct option long_options[] = {
         {"dpo", no_argument, 0, 'd'},
         {"fua", no_argument, 0, 'f'},
         {"fua_nv", no_argument, 0, 'F'},
+        {"fua-nv", no_argument, 0, 'F'},
         {"group", required_argument, 0, 'g'},
+        {"grpnum", required_argument, 0, 'g'},
         {"help", no_argument, 0, 'h'},
         {"in", required_argument, 0, 'i'},
         {"inc", required_argument, 0, 'C'},
@@ -98,6 +100,8 @@ struct caw_flags {
 
 struct opts_t {
         bool quiet;
+        bool verbose_given;
+        bool version_given;
         bool wfn_given;
         int numblocks;
         int verbose;
@@ -115,7 +119,7 @@ static void
 usage()
 {
         pr2serr("Usage: sg_compare_and_write [--dpo] [--fua] [--fua_nv] "
-                "[--group=GN] [--help]\n"
+                "[--grpnum=GN] [--help]\n"
                 "                            --in=IF|--inc=IF [--inw=WF] "
                 "--lba=LBA "
                 "[--num=NUM]\n"
@@ -130,7 +134,7 @@ usage()
                 "clear)\n"
                 "    --fua_nv|-F         set the fua_nv bit in cdb (def: "
                 "clear)\n"
-                "    --group=GN|-g GN    GN is GROUP NUMBER to set in "
+                "    --grpnum=GN|-g GN    GN is GROUP NUMBER to set in "
                 "cdb (def: 0)\n"
                 "    --help|-h           print out usage message\n"
                 "    --in=IF|-i IF       IF is a file containing a compare "
@@ -160,7 +164,11 @@ usage()
                 "                            (2 * NUM * 512) or 1024 when "
                 "NUM is 1\n"
                 "\n"
-                "Performs a SCSI COMPARE AND WRITE operation.\n");
+                "Performs a SCSI COMPARE AND WRITE operation. Sends a double "
+                "size\nbuffer, the first half is used to compare what is at "
+                "LBA for NUM\nblocks. If and only if the comparsion is "
+                "equal, then the second\nhalf of the buffer is written to "
+                "LBA for NUM blocks.\n");
 }
 
 static int
@@ -207,7 +215,7 @@ parse_args(int argc, char* argv[], struct opts_t * op)
                         op->flags.group = sg_get_num(optarg);
                         if ((op->flags.group < 0) ||
                             (op->flags.group > 63))  {
-                                pr2serr("argument to '--group' expected to "
+                                pr2serr("argument to '--grpnum=' expected to "
                                         "be 0 to 63\n");
                                 goto out_err_no_usage;
                         }
@@ -244,11 +252,12 @@ parse_args(int argc, char* argv[], struct opts_t * op)
                         }
                         break;
                 case 'v':
+                        op->verbose_given = true;
                         ++op->verbose;
                         break;
                 case 'V':
-                        pr2serr(ME "version: %s\n", version_str);
-                        exit(0);
+                        op->version_given = true;
+                        break;
                 case 'w':
                         op->flags.wrprotect = sg_get_num(optarg);
                         if (op->flags.wrprotect >> 3) {
@@ -311,7 +320,7 @@ out_err_no_usage:
 #define WRPROTECT_SHIFT (5)
 
 static int
-sg_build_scsi_cdb(unsigned char * cdbp, unsigned int blocks,
+sg_build_scsi_cdb(uint8_t * cdbp, unsigned int blocks,
                   int64_t start_block, struct caw_flags flags)
 {
         memset(cdbp, 0, COMPARE_AND_WRITE_CDB_SIZE);
@@ -325,15 +334,15 @@ sg_build_scsi_cdb(unsigned char * cdbp, unsigned int blocks,
                 cdbp[1] |= FLAG_FUA_NV;
         sg_put_unaligned_be64((uint64_t)start_block, cdbp + 2);
         /* cdbp[10-12] are reserved */
-        cdbp[13] = (unsigned char)(blocks & 0xff);
-        cdbp[14] = (unsigned char)(flags.group & 0x1f);
+        cdbp[13] = (uint8_t)(blocks & 0xff);
+        cdbp[14] = (uint8_t)(flags.group & 0x1f);
         return 0;
 }
 
 /* Returns 0 for success, SG_LIB_CAT_MISCOMPARE if compare fails,
  * various other SG_LIB_CAT_*, otherwise -1 . */
 static int
-sg_ll_compare_and_write(int sg_fd, unsigned char * buff, int blocks,
+sg_ll_compare_and_write(int sg_fd, uint8_t * buff, int blocks,
                         int64_t lba, int xfer_len, struct caw_flags flags,
                         bool noisy, int verbose)
 {
@@ -341,8 +350,8 @@ sg_ll_compare_and_write(int sg_fd, unsigned char * buff, int blocks,
         int k, sense_cat, slen, res, ret;
         uint64_t ull = 0;
         struct sg_pt_base * ptvp;
-        unsigned char cawCmd[COMPARE_AND_WRITE_CDB_SIZE];
-        unsigned char sense_b[SENSE_BUFF_LEN];
+        uint8_t cawCmd[COMPARE_AND_WRITE_CDB_SIZE];
+        uint8_t sense_b[SENSE_BUFF_LEN];
 
         if (sg_build_scsi_cdb(cawCmd, blocks, lba, flags)) {
                 pr2serr(ME "bad cdb build, lba=0x%" PRIx64 ", blocks=%d\n",
@@ -366,14 +375,14 @@ sg_ll_compare_and_write(int sg_fd, unsigned char * buff, int blocks,
         }
         if ((verbose > 2) && (xfer_len > 0)) {
                 pr2serr("    Data-out buffer contents:\n");
-                dStrHexErr((const char *)buff, xfer_len, 1);
+                hex2stderr(buff, xfer_len, 1);
         }
         res = do_scsi_pt(ptvp, sg_fd, DEF_TIMEOUT_SECS, verbose);
         ret = sg_cmds_process_resp(ptvp, "COMPARE AND WRITE", res,
                                    SG_NO_DATA_IN, sense_b, noisy, verbose,
                                    &sense_cat);
         if (-1 == ret)
-                ;
+                ret = sg_convert_errno(get_scsi_pt_os_err(ptvp));
         else if (-2 == ret) {
                 switch (sense_cat) {
                 case SG_LIB_CAT_RECOVERED:
@@ -442,12 +451,9 @@ open_dev(const char * outf, int verbose)
 {
         int sg_fd = sg_cmds_open_device(outf, false /* rw */, verbose);
 
-        if (sg_fd < 0) {
+        if ((sg_fd < 0) && verbose)
                 pr2serr(ME "open error: %s: %s\n", outf,
                         safe_strerror(-sg_fd));
-                return -SG_LIB_FILE_ERROR;
-        }
-
         return sg_fd;
 }
 
@@ -456,11 +462,12 @@ int
 main(int argc, char * argv[])
 {
         bool ifn_stdin;
-        int res, half_xlen;
+        int res, half_xlen, vb;
         int infd = -1;
         int wfd = -1;
         int devfd = -1;
-        unsigned char * wrkBuff = NULL;
+        uint8_t * wrkBuff = NULL;
+        uint8_t * free_wrkBuff = NULL;
         struct opts_t * op;
         struct opts_t opts;
 
@@ -472,7 +479,31 @@ main(int argc, char * argv[])
                 goto out;
         }
 
-        if (op->verbose) {
+#ifdef DEBUG
+        pr2serr("In DEBUG mode, ");
+        if (op->verbose_given && op->version_given) {
+                pr2serr("but override: '-vV' given, zero verbose and "
+                        "continue\n");
+                op->verbose_given = false;
+                op->version_given = false;
+                op->verbose = 0;
+        } else if (! op->verbose_given) {
+                pr2serr("set '-vv'\n");
+                op->verbose = 2;
+        } else
+                pr2serr("keep verbose=%d\n", op->verbose);
+#else
+        if (op->verbose_given && op->version_given)
+                pr2serr("Not in DEBUG mode, so '-vV' has no special "
+                        "action\n");
+#endif
+        if (op->version_given) {
+                pr2serr(ME "version: %s\n", version_str);
+                return 0;
+        }
+        vb = op->verbose;
+
+        if (vb) {
                 pr2serr("Running COMPARE AND WRITE command with the "
                         "following options:\n  in=%s ", op->ifn);
                 if (op->wfn_given)
@@ -500,16 +531,17 @@ main(int argc, char * argv[])
                 }
         }
 
-        devfd = open_dev(op->device_name, op->verbose);
+        devfd = open_dev(op->device_name, vb);
         if (devfd < 0) {
-                res = -devfd;
+                res = sg_convert_errno(-devfd);
                 goto out;
         }
 
-        wrkBuff = (unsigned char *)malloc(op->xfer_len);
-        if (0 == wrkBuff) {
+        wrkBuff = (uint8_t *)sg_memalign(op->xfer_len, 0, &free_wrkBuff,
+                                         vb > 3);
+        if (NULL == wrkBuff) {
                 pr2serr("Not enough user memory\n");
-                res = SG_LIB_CAT_OTHER;
+                res = sg_convert_errno(ENOMEM);
                 goto out;
         }
 
@@ -546,9 +578,7 @@ main(int argc, char * argv[])
         }
         res = sg_ll_compare_and_write(devfd, wrkBuff, op->numblocks, op->lba,
                                       op->xfer_len, op->flags, ! op->quiet,
-                                      op->verbose);
-
-out:
+                                      vb);
         if (0 != res) {
                 char b[80];
 
@@ -558,20 +588,24 @@ out:
                 case SG_LIB_FILE_ERROR:
                         break;  /* already reported */
                 default:
-                        sg_get_category_sense_str(res, sizeof(b), b,
-                                                  op->verbose);
+                        sg_get_category_sense_str(res, sizeof(b), b, vb);
                         pr2serr(ME "SCSI COMPARE AND WRITE: %s\n", b);
                         break;
                 }
         }
-
-        if (wrkBuff)
-                free(wrkBuff);
+out:
+        if (free_wrkBuff)
+                free(free_wrkBuff);
         if ((infd >= 0) && (! ifn_stdin))
                 close(infd);
         if (wfd >= 0)
                 close(wfd);
         if (devfd >= 0)
                 close(devfd);
+        if (0 == op->verbose) {
+                if (! sg_if_can2stderr("sg_compare_and_write failed: ", res))
+                        pr2serr("Some error occurred, try again with '-v' "
+                                "or '-vv' for more information\n");
+        }
         return res;
 }

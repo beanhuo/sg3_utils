@@ -1,5 +1,5 @@
 /* A utility program for the Linux OS SCSI subsystem.
- *  Copyright (C) 2004-2017 D. Gilbert
+ *  Copyright (C) 2004-2018 D. Gilbert
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
  *  the Free Software Foundation; either version 2, or (at your option)
@@ -8,7 +8,7 @@
  * This program issues the SCSI command WRITE LONG to a given SCSI device.
  * It sends the command with the logical block address passed as the lba
  * argument, and the transfer length set to the xfer_len argument. the
- * buffer to be writen to the device filled with 0xff, this buffer includes
+ * buffer to be written to the device filled with 0xff, this buffer includes
  * the sector data and the ECC bytes.
  *
  * This code was contributed by Saeed Bishara
@@ -29,25 +29,25 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_cmds_basic.h"
 #include "sg_cmds_extra.h"
 #include "sg_pr2serr.h"
 
-static const char * version_str = "1.14 20171008";
+static const char * version_str = "1.21 20180723";
 
 
-#define MAX_XFER_LEN 10000
-
-/* #define SG_DEBUG */
+#define MAX_XFER_LEN (15 * 1024)
 
 #define ME "sg_write_long: "
 
-#define EBUFF_SZ 256
+#define EBUFF_SZ 512
 
 static struct option long_options[] = {
         {"16", no_argument, 0, 'S'},
         {"cor_dis", no_argument, 0, 'c'},
+        {"cor-dis", no_argument, 0, 'c'},
         {"help", no_argument, 0, 'h'},
         {"in", required_argument, 0, 'i'},
         {"lba", required_argument, 0, 'l'},
@@ -55,7 +55,9 @@ static struct option long_options[] = {
         {"verbose", no_argument, 0, 'v'},
         {"version", no_argument, 0, 'V'},
         {"wr_uncor", no_argument, 0, 'w'},
+        {"wr-uncor", no_argument, 0, 'w'},
         {"xfer_len", required_argument, 0, 'x'},
+        {"xfer-len", required_argument, 0, 'x'},
         {0, 0, 0, 0},
 };
 
@@ -100,16 +102,20 @@ main(int argc, char * argv[])
     bool cor_dis = false;
     bool got_stdin;
     bool pblock = false;
+    bool verbose_given = false;
+    bool version_given = false;
     bool wr_uncor = false;
-    int sg_fd, res, c, infd, offset;
+    int res, c, infd, offset;
+    int sg_fd = -1;
     int xfer_len = 520;
     int ret = 1;
     int verbose = 0;
     int64_t ll;
     uint64_t llba = 0;
     const char * device_name = NULL;
-    unsigned char * writeLongBuff = NULL;
+    uint8_t * writeLongBuff = NULL;
     void * rawp = NULL;
+    uint8_t * free_rawp = NULL;
     const char * ten_or;
     char file_name[256];
     char b[80];
@@ -133,7 +139,8 @@ main(int argc, char * argv[])
             usage();
             return 0;
         case 'i':
-            strncpy(file_name, optarg, sizeof(file_name));
+            strncpy(file_name, optarg, sizeof(file_name) - 1);
+            file_name[sizeof(file_name) - 1] = '\0';
             break;
         case 'l':
             ll = sg_get_llnum(optarg);
@@ -150,11 +157,12 @@ main(int argc, char * argv[])
             do_16 = true;
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr(ME "version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         case 'w':
             wr_uncor = true;
             break;
@@ -184,8 +192,29 @@ main(int argc, char * argv[])
         }
     }
 
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr(ME "version: %s\n", version_str);
+        return 0;
+    }
+
     if (NULL == device_name) {
-        pr2serr("missing device name!\n");
+        pr2serr("Missing device name!\n\n");
         usage();
         return SG_LIB_SYNTAX_ERROR;
     }
@@ -199,8 +228,11 @@ main(int argc, char * argv[])
     }
     sg_fd = sg_cmds_open_device(device_name, false /* rw */, verbose);
     if (sg_fd < 0) {
-        pr2serr(ME "open error: %s: %s\n", device_name, safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        if (verbose)
+            pr2serr(ME "open error: %s: %s\n", device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
+        goto err_out;
     }
 
     if (wr_uncor) {
@@ -208,12 +240,12 @@ main(int argc, char * argv[])
             pr2serr(">>> warning: when '--wr_uncor' given '-in=' is "
                     "ignored\n");
     } else {
-        if (NULL == (rawp = malloc(MAX_XFER_LEN))) {
+        if (NULL == (rawp = sg_memalign(MAX_XFER_LEN, 0, &free_rawp, false))) {
             pr2serr(ME "out of memory\n");
-            ret = SG_LIB_FILE_ERROR;
+            ret = sg_convert_errno(ENOMEM);
             goto err_out;
         }
-        writeLongBuff = (unsigned char *)rawp;
+        writeLongBuff = (uint8_t *)rawp;
         memset(rawp, 0xff, MAX_XFER_LEN);
         if (file_name[0]) {
             got_stdin = (0 == strcmp(file_name, "-"));
@@ -278,13 +310,20 @@ main(int argc, char * argv[])
     }
 
 err_out:
-    if (rawp)
-        free(rawp);
-    res = sg_cmds_close_device(sg_fd);
-    if (res < 0) {
-        pr2serr("close error: %s\n", safe_strerror(-res));
-        if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+    if (free_rawp)
+        free(free_rawp);
+    if (sg_fd >= 0) {
+        res = sg_cmds_close_device(sg_fd);
+        if (res < 0) {
+            pr2serr("close error: %s\n", safe_strerror(-res));
+            if (0 == ret)
+                ret = sg_convert_errno(-res);
+        }
+    }
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_write_long failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

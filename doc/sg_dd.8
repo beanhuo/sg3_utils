@@ -1,4 +1,4 @@
-.TH SG_DD "8" "June 2013" "sg3_utils\-1.37" SG3_UTILS
+.TH SG_DD "8" "June 2018" "sg3_utils\-1.43" SG3_UTILS
 .SH NAME
 sg_dd \- copy data to and from files and devices, especially SCSI
 devices
@@ -6,8 +6,8 @@ devices
 .B sg_dd
 [\fIbs=BS\fR] [\fIconv=CONV\fR] [\fIcount=COUNT\fR] [\fIibs=BS\fR]
 [\fIif=IFILE\fR] [\fIiflag=FLAGS\fR] [\fIobs=BS\fR] [\fIof=OFILE\fR]
-[\fIoflag=FLAGS\fR] [\fIseek=SEEK\fR] [\fIskip=SKIP\fR] [\fI\-\-help\fR]
-[\fI\-\-version\fR]
+[\fIoflag=FLAGS\fR] [\fIseek=SEEK\fR] [\fIskip=SKIP\fR] [\fI\-\-dry\-run\fR]
+[\fI\-\-help\fR] [\fI\-\-verbose\fR] [\fI\-\-version\fR]
 .PP
 [\fIblk_sgio=\fR{0|1}] [\fIbpt=BPT\fR] [\fIcdbsz=\fR{6|10|12|16}]
 [\fIcoe=\fR{0|1|2|3}] [\fIcoe_limit=CL\fR] [\fIdio=\fR{0|1}]
@@ -151,10 +151,10 @@ unless 'oflag=append' or \fISEEK\fR is given.
 \fBof2\fR=\fIOFILE2\fR
 write output to \fIOFILE2\fR. The default action is not to do this additional
 write (i.e. when this option is not given). \fIOFILE2\fR is assumed to be
-a normal file or a fifo (i.e. a named pipe). \fIOFILE2\fR is opened for writing,
-created if necessary, and closed at the end of the transfer. If \fIOFILE2\fR
-is a fifo (named pipe) then some other command should be consuming that
-data (e.g. 'md5sum OFILE2'), otherwise this utility will block.
+a normal file or a fifo (i.e. a named pipe). \fIOFILE2\fR is opened for
+writing, created if necessary, and closed at the end of the transfer. If
+\fIOFILE2\fR is a fifo (named pipe) then some other command should be
+consuming that data (e.g. 'md5sum OFILE2'), otherwise this utility will block.
 .TP
 \fBoflag\fR=\fIFLAGS\fR
 where \fIFLAGS\fR is a comma separated list of one or more flags outlined
@@ -194,13 +194,21 @@ Unix read() and write() calls) so there can be a lot of output.
 This only occurs for scsi generic (sg) devices and block devices when
 the 'blk_sgio=1' option is set.
 .TP
-\fB\-\-help\fR
+\fB\-d\fR, \fB\-\-dry\-run\fR
+does all the command line parsing and preparation but bypasses the actual
+copy or read. That preparation may include opening \fIIFILE\fR or
+\fIOFILE\fR to determine their lengths. This option may be useful for
+testing the syntax of complex command line invocations in advance of
+executing them.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
 outputs usage message and exits.
 .TP
-\fB\-\-version\fR
-outputs version number information and exits.
+\fB\-v\fR, \fB\-\-verbose\fR
+when used once, this is equivalent to \fIverbose=1\fR. When used
+twice (e.g. "\-vv") this is equivalent to \fIverbose=2\fR, etc.
 .TP
-\fB\-V\fR
+\fB\-V\fR, \fB\-\-version\fR
 outputs version number information and exits.
 .SH CONVERSIONS
 One or more conversions can be given to the "conv=" option. If more than
@@ -214,7 +222,7 @@ this conversion is very close to "iflag=coe" and is treated as such. See
 the "coe" flag. Note that an error on \fIOFILE\fR will stop the copy.
 .TP
 notrunc
-this conversion is accepted for compatibilty with dd and ignored since
+this conversion is accepted for compatibility with dd and ignored since
 the default action of this utility is not to truncate \fIOFILE\fR.
 .TP
 null
@@ -483,7 +491,7 @@ Written by Douglas Gilbert and Peter Allworth.
 .SH "REPORTING BUGS"
 Report bugs to <dgilbert at interlog dot com>.
 .SH COPYRIGHT
-Copyright \(co 2000\-2013 Douglas Gilbert
+Copyright \(co 2000\-2018 Douglas Gilbert
 .br
 This software is distributed under the GPL version 2. There is NO
 warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.

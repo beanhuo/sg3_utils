@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006-2017 Luben Tuikov and Douglas Gilbert.
+ * Copyright (c) 2006-2018 Luben Tuikov and Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -20,10 +20,11 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_cmds_basic.h"
 #include "sg_cmds_extra.h"
-#include "sg_pt.h"      /* needed for scsi_pt_win32_direct() */
+#include "sg_pt.h"
 #include "sg_unaligned.h"
 #include "sg_pr2serr.h"
 
@@ -32,7 +33,7 @@
  * device.
  */
 
-static const char * version_str = "1.20 20171103";
+static const char * version_str = "1.25 20180523";
 
 
 #ifndef SG_READ_BUFFER_10_CMD
@@ -173,12 +174,12 @@ sg_ll_read_buffer_10(int sg_fd, int rb_mode, int rb_mode_sp, int rb_id,
     }
     set_scsi_pt_cdb(ptvp, rb10_cb, sizeof(rb10_cb));
     set_scsi_pt_sense(ptvp, sense_b, sizeof(sense_b));
-    set_scsi_pt_data_in(ptvp, (unsigned char *)resp, mx_resp_len);
+    set_scsi_pt_data_in(ptvp, (uint8_t *)resp, mx_resp_len);
     res = do_scsi_pt(ptvp, sg_fd, DEF_PT_TIMEOUT, verbose);
     ret = sg_cmds_process_resp(ptvp, "Read buffer(10)", res, mx_resp_len,
                                sense_b, noisy, verbose, &sense_cat);
     if (-1 == ret)
-        ;
+        ret = sg_convert_errno(get_scsi_pt_os_err(ptvp));
     else if (-2 == ret) {
         switch (sense_cat) {
         case SG_LIB_CAT_RECOVERED:
@@ -193,7 +194,7 @@ sg_ll_read_buffer_10(int sg_fd, int rb_mode, int rb_mode_sp, int rb_id,
         if ((verbose > 2) && (ret > 0)) {
             pr2serr("    Read buffer(10): response%s\n",
                     (ret > 256 ? ", first 256 bytes" : ""));
-            dStrHexErr((const char *)resp, (ret > 256 ? 256 : ret), -1);
+            hex2stderr((const uint8_t *)resp, (ret > 256 ? 256 : ret), -1);
         }
         ret = 0;
     }
@@ -237,12 +238,12 @@ sg_ll_read_buffer_16(int sg_fd, int rb_mode, int rb_mode_sp, int rb_id,
     }
     set_scsi_pt_cdb(ptvp, rb16_cb, sizeof(rb16_cb));
     set_scsi_pt_sense(ptvp, sense_b, sizeof(sense_b));
-    set_scsi_pt_data_in(ptvp, (unsigned char *)resp, mx_resp_len);
+    set_scsi_pt_data_in(ptvp, (uint8_t *)resp, mx_resp_len);
     res = do_scsi_pt(ptvp, sg_fd, DEF_PT_TIMEOUT, verbose);
     ret = sg_cmds_process_resp(ptvp, "Read buffer(16)", res, mx_resp_len,
                                sense_b, noisy, verbose, &sense_cat);
     if (-1 == ret)
-        ;
+        ret = sg_convert_errno(get_scsi_pt_os_err(ptvp));
     else if (-2 == ret) {
         switch (sense_cat) {
         case SG_LIB_CAT_RECOVERED:
@@ -257,7 +258,7 @@ sg_ll_read_buffer_16(int sg_fd, int rb_mode, int rb_mode_sp, int rb_id,
         if ((verbose > 2) && (ret > 0)) {
             pr2serr("    Read buffer(16): response%s\n",
                     (ret > 256 ? ", first 256 bytes" : ""));
-            dStrHexErr((const char *)resp, (ret > 256 ? 256 : ret), -1);
+            hex2stderr((const uint8_t *)resp, (ret > 256 ? 256 : ret), -1);
         }
         ret = 0;
     }
@@ -268,11 +269,11 @@ sg_ll_read_buffer_16(int sg_fd, int rb_mode, int rb_mode_sp, int rb_id,
 }
 
 static void
-dStrRaw(const char* str, int len)
+dStrRaw(const uint8_t * str, int len)
 {
     int k;
 
-    for (k = 0 ; k < len; ++k)
+    for (k = 0; k < len; ++k)
         printf("%c", str[k]);
 }
 
@@ -282,6 +283,8 @@ main(int argc, char * argv[])
     bool do_long = false;
     bool o_readonly = false;
     bool do_raw = false;
+    bool verbose_given = false;
+    bool version_given = false;
     int res, c, len, k;
     int sg_fd = -1;
     int do_help = 0;
@@ -296,7 +299,7 @@ main(int argc, char * argv[])
     int64_t ll;
     uint64_t rb_offset = 0;
     const char * device_name = NULL;
-    unsigned char * resp;
+    uint8_t * resp;
     const struct mode_s * mp;
 
     while (1) {
@@ -381,11 +384,12 @@ main(int argc, char * argv[])
             }
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr("version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
             usage();
@@ -414,14 +418,35 @@ main(int argc, char * argv[])
         }
     }
 
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr("version: %s\n", version_str);
+        return 0;
+    }
+
     if (NULL == device_name) {
-        pr2serr("missing device name!\n");
+        pr2serr("Missing device name!\n\n");
         usage();
         return SG_LIB_SYNTAX_ERROR;
     }
 
     len = rb_len ? rb_len : 8;
-    resp = (unsigned char *)malloc(len);
+    resp = (uint8_t *)malloc(len);
     if (NULL == resp) {
         pr2serr("unable to allocate %d bytes on the heap\n", len);
         return SG_LIB_CAT_OTHER;
@@ -447,8 +472,10 @@ main(int argc, char * argv[])
 
     sg_fd = sg_cmds_open_device(device_name, o_readonly, verbose);
     if (sg_fd < 0) {
-        pr2serr("open error: %s: %s\n", device_name, safe_strerror(-sg_fd));
-        ret = SG_LIB_FILE_ERROR;
+        if (verbose)
+            pr2serr("open error: %s: %s\n", device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
         goto fini;
     }
 
@@ -479,9 +506,9 @@ main(int argc, char * argv[])
         rb_len -= resid;        /* got back less than requested */
     if (rb_len > 0) {
         if (do_raw)
-            dStrRaw((const char *)resp, rb_len);
+            dStrRaw(resp, rb_len);
         else if (do_hex || (rb_len < 4))
-            dStrHex((const char *)resp, rb_len, ((do_hex > 1) ? 0 : 1));
+            hex2stdout((const uint8_t *)resp, rb_len, ((do_hex > 1) ? 0 : 1));
         else {
             switch (rb_mode) {
             case MODE_DESCRIPTOR:
@@ -496,7 +523,8 @@ main(int argc, char * argv[])
                 printf("Echo buffer capacity: %d (0x%x)\n", k, k);
                 break;
             default:
-                dStrHex((const char *)resp, rb_len, (verbose > 1 ? 0 : 1));
+                hex2stdout((const uint8_t *)resp, rb_len,
+                           (verbose > 1 ? 0 : 1));
                 break;
             }
         }
@@ -510,8 +538,13 @@ fini:
         if (res < 0) {
             pr2serr("close error: %s\n", safe_strerror(-res));
             if (0 == ret)
-                return SG_LIB_FILE_ERROR;
+                ret = sg_convert_errno(-res);
         }
+    }
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_read_buffer failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

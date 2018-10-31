@@ -2,15 +2,18 @@
                       ====================
 Introduction
 ============
-This package contains low level utilities for devices that use the SCSI
-command set. Originally the SCSI command set was associated exclusively
-with the SCSI Parallel Interface (SPI) transport. SPI has now almost
-been completely replaced by the Serial Attached SCSI (SAS) transport which
-also accepts the SCSI command set. Additionally many other storage related
-transports use the SCSI command set (amongst others); examples are ATAPI
-devices (CD/DVDs and tapes), USB mass storage devices (including those
+This package contains low level command line utilities for devices that use
+the SCSI command set. Originally the SCSI command set was associated
+exclusively with the SCSI Parallel Interface (SPI) transport. SPI has now
+almost been completely replaced by the Serial Attached SCSI (SAS) transport
+which also accepts the SCSI command set. Additionally many other storage
+related transports use the SCSI command set (amongst others); examples are
+ATAPI devices (CD/DVDs and tapes), USB mass storage devices (including those
 using the newer UAS[P]), Fibre Channel disks, IEEE 1394 storage devices (SBP
-protocol), iSCSI, FCoE and SOP devices.
+protocol), iSCSI, FCoE and SOP devices. Even NVMe which has its own command
+set accepts SCSI commands in some contexts; one example is for enclosure
+management where NVME-MI has SES Send and SES Receive commands. SES refers
+to the SCSI Enclosure Services command set.
 
 This package originally targeted the Linux SCSI subsystem. Since most
 operating systems contain a SCSI command pass-through mechanism, many
@@ -34,6 +37,20 @@ These utilities are relatively tightly bound to Linux and are not ported to
 other Operating Systems. A new utility called ddpt (in a package of the same
 name) is more generic while still allowing a copy to be done in terms of
 SCSI READ and WRITE commands. ddpt has been ported to other OSes.
+
+License
+=======
+All utilities and libraries have either a "2 clause" BSD license or are
+"GPL-2ed". The "2 clause" BSD license is taken from the FreeBSD project but
+drops the last paragraph that directly refers to the "FreeBSD project".
+That BSD license was updated from the "3 clause" to the newer "2 clause"
+version on 20180119. To save space various source code files refer to a
+file called "BSD_LICENSE" in the main, src and lib directories. The author's
+intention is that users may incorporate all or part of the code in their work
+as they please. Attribution is encouraged. Please check the code as other
+contributors (apart from the author) may also have copyright notices. For a
+list of contributors see the CREDITS file.
+
 
 Description
 ===========
@@ -84,12 +101,6 @@ original xml can be found in the same directory with the ".xml" extension.
 Postscript and pdf renderings are also in that directory. Older documentation
 for the sg version 3 driver can be found at:
 http://sg.danny.cz/sg/p/scsi_generic_v3.txt .
-
-All utilities are either "GPL"-ed or have a FreeBSD license. The author's
-intention is that users may incorporate all or part of the code in their work
-as they please. Attribution is encouraged. Please check the code as other
-contributors (apart from the author) may also have copyright notices. For a
-list of contributors see the CREDITS file.
 
 To save the repetition of common code (e.g. SCSI error processing) and
 reduce the size of the executable files, a shared library called
@@ -151,15 +162,26 @@ Darwin is not supported because the Apple folks do not want to give their
 users a pass-through SCSI interface. The author has read about creative
 hackers using a VM containing a real OS to circumvent the Apple restriction.
 
-C standard is C99
+C standard is C11
 ==================
 The C code in this package is written for portability rather than speed.
-It assumes a level of C99 compliance and favours POSIX system and library
-calls over OS specific calls.
+It assumes a level of C99 compliance (the C standard prior to C11) and
+favours POSIX system and library calls over OS specific calls.
 
 The C code is written in a C++ friendly way and is checked from time to
 time that it compiles clean with C++. To accommodate C++ certain C99
 constructs such as designated initializers cannot be used.
+
+The author has not seriously attempted to build this code on MSVC (aka
+Visual Studio). There are a few roadblocks (that may be overcome in the
+future) that include MSVC being basically a C++ compiler, not a C/C++
+compiler. For some reason MSVC only claims C89 compliance (i.e. the first
+C standard from 1989). MSVC 2013 and 2015 are moving closer to C99
+compliance and may be sufficient to compile this package. Another problem
+is the assumption of the availability of basic Unix system calls such as
+open(). Nearly 20 years ago Microsoft indicated (promised ?) that it
+would move in the direction of POSIX compliance, but very little ever
+happened. "Talk is cheap, there should be a tax on it."
 
 Building
 ========
@@ -181,6 +203,12 @@ and disable the creation of the shared library (libsgutils<num>.so) this
 invocation could be used: "./configure --prefix=/usr --disable-shared".
 To reduce the size of an executable as well try this:
 "./configure --prefix=/usr --disable-shared --disable-scsistrings".
+Also --disable-shared will produce (realtively) "static" executables in
+the src directory that are easier to debug. And
+"./configure --enable-debug" will compile with more debug type options,
+including more compiler checks and defining "DEBUG" within the src and
+lib source files. Most utilities in the src directory set '-vv' (i.e.
+equivalent to calling "--verbose" twice) when "DEBUG" is set.
 
 In Linux there are package build files for "rpm" based and for "deb" based
 systems. The 'sg3_utils.spec' file in the main directory can be used like
@@ -236,11 +264,11 @@ subdirectory of the sg3_utils package:
     sg_read, sg_read_attr, sg_readcap, sg_read_block_limits, sg_read_buffer,
     sg_read_long, sg_reassign, sg_referrals, sg_request, sg_reset, sg_rmsn,
     sg_rtpg, sg_safte, sg_sanitize, sg_sat_identify, sg_sat_phy_event,
-    sg_sat_read_gplog, sg_sat_set_features, sg_scan, sg_senddiag, sg_ses,
-    sg_ses_microcode, sg_start, sg_stpg, sg_sync, sg_test_rwbuff,
-    sg_timestamp, sg_turs, sg_unmap, sg_verify, sg_vpd, sg_write_atomic,
+    sg_sat_read_gplog, sg_sat_set_features, sg_scan, sg_seek, sg_senddiag,
+    sg_ses, sg_ses_microcode, sg_start, sg_stpg, sg_stream_ctl, sg_sync,
+    sg_test_rwbuff, sg_timestamp, sg_turs, sg_unmap, sg_verify, sg_vpd,
     sg_write_buffer, sg_write_long, sg_write_same, sg_write_verify,
-    sg_wr_mode, sg_xcopy, sg_zone
+    sg_write_x, sg_wr_mode, sg_xcopy, sg_zone
 
 Each of the above utilities depends on header files found in the 'include'
 subdirectory and library code found in the 'lib' subdirectory. Associated
@@ -279,7 +307,7 @@ both C code (with the extension ".c") and C++ code (with the extension
 ".cpp"). There is a "Makefile" to build the C code and a "Makefile.cplus"
 to build the C++ code. Both depend on some object files from the "lib"
 subdirectory. So a sequence like this may be required prior to invoking
-one of the Mkaefiles in the directory: "cd <top_of_package> ;
+one of the Makefiles in the directory: "cd <top_of_package> ;
 ./configure ; cd lib ; make ; cd ../testing".
 
 Here is a list in alphabetical order of utilities found in the 'testing'
@@ -402,9 +430,10 @@ The more recent utilities that use "getopt_long" only are:
     sg_read_buffer, sg_read_long, sg_reassign, sg_referrals, sg_requests,
     sg_rmsn, sg_rtpg, sg_safte, sg_sanitize, sg_sat_identify,
     sg_sat_phy_event, sg_sat_read_gplog, sg_sat_set_features, sg_scan(w),
-    sg_ses, sg_ses_microcode, sg_stpg, sg_sync, sg_test_rwbuf, sg_timestamp,
-    sg_unmap, sg_verify, sg_vpd, sg_write_atomic, sg_write_buffer,
-    sg_write_long, sg_write_same, sg_write_verify, sg_wr_mode, sg_zone
+    sg_seek, sg_ses, sg_ses_microcode, sg_stpg, sg_stream_ctl, sg_sync,
+    sg_test_rwbuf, sg_timestamp, sg_unmap, sg_verify, sg_vpd,
+    sg_write_buffer, sg_write_long, sg_write_same, sg_write_verify,
+    sg_write_x, sg_wr_mode, sg_zone
 
 
 Dangerous code
@@ -460,14 +489,28 @@ and it has been replaced by:
 The Linux kernel only supplies "unaligned" functions for 16, 32 and 64
 bit quantities. SCSI commands also have cases of 24 and 48 bit numbers
 so sg_unaligned.h contains support for those plus a variant where the
-bit length is passed as an argument.
+byte length is passed as an argument.
 
-Associated with the above change fixed length integer types seem a better
+The unaligned functions are inlined for speed (at the possible expense of
+space) and now have specializations depending whether the host is big or
+(more likely) little endian. These functions can be broken down to a
+memcpy() and optionally a byte-swap for 16, 32 and 64 bit operations.
+The memcpy() takes care of alignment while the byte-swap (bswap_16(),
+bswap_32() and bswap_64() ) addresses integer endianness. If the host is
+little endian and a little endian variant of the unaligned functions is
+requested, then no byte-swap is required. These specializations can be
+"compiled out" with this configure option: './configure
+--disable-fast-lebe' in which case the classic "C shifting" technique is
+used to implement all the unaligned functions.
+
+Associated with the above change, fixed length integer types seem a better
 fit for SCSI command and parameter integers than the traditional integer
 types in the C language. Fixed length integer types were standardized in
 C99 and require the inclusion of <stdint.h>. For example this means for
 an integer that will represent a 64 bit LBA, to favour using "uint64_t"
-over the "unsigned long long" type.
+over the "unsigned long long" type. Also "unsigned char" has mostly been
+replaced by "uint8_t" as the 8 bit (unsigned) byte type; "char" is still
+used for ASCII text.
 
 
 Other SCSI and storage tools
@@ -476,4 +519,4 @@ See http://sg.danny.cz/sg/tools.html
 
 
 Douglas Gilbert
-4th November 2017
+28th June 2018

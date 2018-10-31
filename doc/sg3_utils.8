@@ -1,12 +1,12 @@
-.TH SG3_UTILS "8" "November 2017" "sg3_utils\-1.43" SG3_UTILS
+.TH SG3_UTILS "8" "July 2018" "sg3_utils\-1.43" SG3_UTILS
 .SH NAME
 sg3_utils \- a package of utilities for sending SCSI commands
 .SH SYNOPSIS
 .B sg_*
-[\fI\-\-enumerate\fR] [\fI\-\-help\fR] [\fI\-\-hex\fR] [\fI\-\-in=FN\fR]
-[\fI\-\-maxlen=LEN\fR] [\fI\-\-raw\fR] [\fI\-\-timeout=SEC\fR]
-[\fI\-\-verbose\fR] [\fI\-\-version\fR] [\fIOTHER_OPTIONS\fR]
-\fIDEVICE\fR
+[\fI\-\-dry\-run\fR] [\fI\-\-enumerate\fR] [\fI\-\-help\fR] [\fI\-\-hex\fR]
+[\fI\-\-in=FN\fR] [\fI\-\-maxlen=LEN\fR] [\fI\-\-raw\fR]
+[\fI\-\-timeout=SECS\fR] [\fI\-\-verbose\fR] [\fI\-\-version\fR]
+[\fIOTHER_OPTIONS\fR] \fIDEVICE\fR
 .SH DESCRIPTION
 .\" Add any additional description here
 .PP
@@ -32,10 +32,12 @@ A good overview of various SCSI standards can be seen in
 http://www.t10.org/scsi\-3.htm with the SCSI command sets in the upper part
 of the diagram. The highest level (i.e. most abstract) document is the SCSI
 Architecture Model (SAM) with SAM\-5 being the most recent standard (ANSI
-INCITS 447-2008) although SAM\-5 should be released soon. SCSI commands in
-common with all device types can be found in SPC of which SPC\-5 is the
-latest major version. Block device specific commands (e.g. as used by disks)
-are in SBC, those for tape drives in SSC and those for CD/DVD/BD drives in
+INCITS 515\-2016) with the most recent draft being SAM\-6 revision 4 . SCSI
+commands in common with all device types can be found in SCSI Primary
+Commands (SPC) of which SPC\-4 is the most recent standard (ANSI INCITS
+513-2015). The most recent SPC draft is SPC\-5 revision 19. Block device
+specific commands (e.g. as used by disks) are in SBC, those for tape drives
+in SSC, those for SCSI enclosures in SES and those for CD/DVD/BD drives in
 MMC.
 .PP
 It is becoming more common to control ATA disks with the SCSI command set.
@@ -84,6 +86,18 @@ and permit copying data at the level of SCSI READ and WRITE commands. sg_dd
 is tightly bound to Linux and hence is not ported to other OSes. A more
 generic utility (than sg_dd) called ddpt in a package of the same name has
 been ported to other OSes.
+.SH ENVIRONMENT VARIABLES
+The SG3_UTILS_OLD_OPTS environment variable is explained in the previous
+section. It is only for backward compatibility of the command line options
+for older utilities.
+.PP
+The SG3_UTILS_DSENSE environment variable may be set to a number. If that
+number is non\-zero then descriptor sense is set in the SNTL (the small
+SCSI to NVMe Translation Layer within the underlying library).
+.PP
+Several utilities have their own environment variable setting (e.g.
+sg_persist has SG_PERSIST_IN_RDONLY). See individual utility man pages
+for more information.
 .SH LINUX DEVICE NAMING
 Most disk block devices have names like /dev/sda, /dev/sdb, /dev/sdc, etc.
 SCSI disks in Linux have always had names like that but in recent Linux
@@ -199,13 +213,62 @@ the 'format' command" advice works but seems a very dangerous way to list
 devices. [It does prompt again before doing any damage.] 'devfsadm \-Cv'
 cleans out the clutter in the /dev/rdsk directory, only leaving what
 is "live". The "cfgadm \-v" command looks promising.
+.SH NVME SUPPORT
+NVMe (or NVM Express) is a relatively new storage transport and command
+set. The level of abstraction of the NVMe command set is somewhat lower
+the SCSI command sets, closer to the level of abstraction of ATA (and SATA)
+command sets. NVMe claims to be designed with flash and modern "solid
+state" storage in mind, something unheard of when SCSI was originally
+developed in the 1980s.
+.PP
+The SCSI command sets' advantage is the length of time they have been in
+place and the existing tools (like these) to support it. Plus SCSI command
+sets level of abstraction is both and advantage and disadvantage. Recently
+the NVME\-MI (Management Interface) designers decide to use the SCSI
+Enclosure Services (SES\-3) standard "as is" with the addition of two
+tunnelling NVME\-MI commands: SES Send and SES Receive. This means after the
+OS interface differences are taken into account, the sg_ses, sg_ses_microcode
+and sg_senddiag utilities can be used on a NVMe device that supports a newer
+version of NVME\-MI.
+.PP
+The NVME\-MI SES Send and SES Receive commands correspond to the SCSI
+SEND DIAGNOSTIC and RECEIVE DIAGNOSTIC RESULTS commands respectively.
+There are however a few other commands that need to be translated, the
+most important of which is the SCSI INQUIRY command to the NVMe Identify
+controller/namespace. Version 1.43 of these utilities contain a small
+SNTL (SCSI to NVMe Translation Layer) to take care of these details.
+.PP
+As a side effect of this "juggling" if the sg_inq utility is used (without
+the \-\-page= option) on a NVMe \fIDEVICE\fR then the actual NVMe
+Identifier (controller and possibly namespace) responses are decoded and
+output. However if 'sg_inq \-\-page=sinq <device>' is given for the
+same \fIDEVICE\fR then parts of the NVMe Identify controller and namespace
+response are translated to a SCSI standard INQUIRY response which is then
+decoded and output.
+.PP
+Apart from the special case with the sg_inq, all other utilities in the
+package assume they are talking to a SCSI device and decode any response
+accordingly. One easy way for users to see the underlying device is a
+NVMe device is the standard INQUIRY response Vendor Identification field
+of "NVMe    " (an 8 character long string with 4 spaces to the right).
 .SH EXIT STATUS
 To aid scripts that call these utilities, the exit status is set to indicate
 success (0) or failure (1 or more). Note that some of the lower values
-correspond to the SCSI sense key values. The exit status values are:
+correspond to the SCSI sense key values.
+.PP
+The exit status values listed below can be given to the sg_decode_sense
+utility (which is found in this package) as follows:
+.br
+  sg_decode_sense \-\-err=<exit_status>
+.br
+and a short explanatory string will be output to stdout.
+.PP
+The exit status values are:
 .TP
 .B 0
-success
+success. Also used for some utilities that wish to return a boolean value
+for the "true" case (and that no error has occurred). The false case is
+conveyed by exit status 36.
 .TP
 .B 1
 syntax error. Either illegal command line options, options with bad
@@ -263,6 +326,15 @@ the utility is unable to open, close or use the given \fIDEVICE\fR or some
 other file. The given file name could be incorrect or there may be
 permission problems. Adding the '\-v' option may give more information.
 .TP
+.B 17
+a SCSI "Illegal request" sense code received with a flag indicating the
+Info field is valid. This is often a LBA but its meaning is command specific.
+.TP
+.B 18
+the \fIDEVICE\fR reports a medium or hardware error (or a blank check)
+with a flag indicating the Info field is valid. This is often a LBA (of
+the first encountered error) but its meaning is command specific.
+.TP
 .B 20
 the \fIDEVICE\fR reports it has a check condition but "no sense"
 and non\-zero information in its additional sense codes. Some polling
@@ -274,6 +346,16 @@ the \fIDEVICE\fR reports a "recovered error". The requested command
 was successful. Most likely a utility will report a recovered error
 to stderr and continue, probably leaving the utility with an exit
 status of 0 .
+.TP
+.B 22
+the \fIDEVICE\fR reports that the current command or its parameters imply
+a logical block address (LBA) that is out of range. This happens surprisingly
+often when trying to access the last block on a storage device; either a
+classic "off by one" logic error or a misreading of the response from READ
+CAPACITY(10 or 16) in which the address of the last block rather than the
+number of blocks on the \fIDEVICE\fR is returned. Since LBAs are origin zero
+they range from 0 to n\-1 where n is the number of blocks on the \fIDEVICE\fR,
+so the LBA of the last block is one less than the total number of blocks.
 .TP
 .B 24
 the \fIDEVICE\fR reports a SCSI status of "reservation conflict". This
@@ -304,8 +386,21 @@ the \fIDEVICE\fR reports a SCSI status of "task aborted". SAM\-5 says:
 management function on another I_T nexus and the Control mode page TAS bit
 is set to one".
 .TP
+.B 31
+error involving two or more command line options. They may be contradicting,
+select an unsupported mode, or a required option (given the context) is
+missing.
+.TP
+.B 32
+there is a logic error in the utility. It corresponds to code comments
+like "shouldn't/can't get here". Perhaps the author should be informed.
+.TP
 .B 33
 the command sent to \fIDEVICE\fR has timed out.
+.TP
+.B 36
+no error has occurred plus the utility wants to convey a boolean value
+of false. The corresponding true value is conveyed by a 0 exit status.
 .TP
 .B 40
 the command sent to \fIDEVICE\fR has received an "aborted command" sense
@@ -314,10 +409,44 @@ problems with protection information (PI or DIF). For example this error
 may occur when reading a block on a drive that has never been written (or
 is unmapped) if that drive was formatted with type 1, 2 or 3 protection.
 .TP
+.B 41
+the command sent to \fIDEVICE\fR has received an "aborted command" sense
+key with an additional sense code of 0x10 (as with error code) plus a flag
+indicating the Info field is valid.
+.TP
+.B 48
+this is an internal message indicating a NVMe status field (SF) is other
+than zero after a command has been executed (i.e. something went wrong).
+Work in this area is currently experimental.
+.TP
 .B 49
-low level driver reports a residual count (i.e. number of bytes actually
-received by HBA is 'requested_bytes - residual_count') that is high enough
-to indicate that no useful processing can be done on that response.
+low level driver reports a response's residual count (i.e. number of bytes
+actually received by HBA is 'requested_bytes \- residual_count') that is
+.TP
+.B 50
+OS system calls that fail often return a small integer number to help. In
+Unix these are called "errno" values where 0 implies no error. These error
+codes set aside 51 to 96 for mapping these errno values but that may not be
+sufficient. Higher errno values that cannot be mapped are all mapped to
+this value (i.e. 50).
+.br
+Note that an errno value of 0 is mapped to error code 0.
+.TP
+.B 50 + <os_error_number>
+OS system calls that fail often return a small integer number to help
+indicate what the error is. For example in Unix the inability of a system
+call to allocate memory returns (in 'errno') ENOMEM which often is
+associated with the integer 12. So 62 (i.e. '50 + 12') may be returned
+by a utility in this case. It is also possible that a utility in this
+package reports 50+ENOMEM when it can't allocate memory, not necessarily
+from an OS system call. In recent versions of Linux the file showing the
+mapping between symbolic constants (e.g. ENOMEM) and the corresponding
+integer is in the kernel source code file:
+include/uapi/asm\-generic/errno\-base.h
+.br
+Note that errno values that are greater than or equal to 47 cannot fit in
+range provided. Instead they are all mapped to 50 as discussed in the
+previous entry.
 .TP
 .B 97
 a SCSI command response failed sanity checks.
@@ -330,6 +459,11 @@ doesn't fit into any of the above categories.
 any errors that can't be categorized into values 1 to 98 may yield
 this value. This includes transport and operating system errors
 after the command has been sent to the device.
+.TP
+.B 100\-125
+these error codes are used by the ddpt utility which uses the sg3_utils
+library. They are mainly specialized error codes associated with offloaded
+copies.
 .TP
 .B 126
 the utility was found but could not be executed. That might occur if the
@@ -350,10 +484,9 @@ associated signal number of 11; so the exit status will be 139 .
 the utility tried to yield an exit status of 255 or larger. That should
 not happen; given here for completeness.
 .PP
-Most of the error conditions reported above will be repeatable (an
-example of one that is not is "unit attention") so the utility can
-be run again with the '\-v' option (or several) to obtain more
-information.
+Most of the error conditions reported above will be repeatable (an example
+of one that is not is "unit attention") so the utility can be run again with
+the '\-v' option (or several) to obtain more information.
 .SH COMMON OPTIONS
 Arguments to long options are mandatory for short options as well. In the
 short form an argument to an option uses zero or more spaces as a
@@ -366,6 +499,18 @@ trailing "h" or as noted in the usage message).
 Some options are used uniformly in most of the utilities in this
 package. Those options are listed below. Note that there are some
 exceptions.
+.TP
+\fB\-d\fR, \fB\-\-dry\-run\fR
+utilities that can cause lots of user data to be lost or overwritten
+sometimes have a \fI\-\-dry\-run\fR option. Device modifying actions are
+typically bypassed (or skipped) to implement a policy of "do no harm".
+This allows complex command line invocations to be tested before the
+action required (e.g. format a disk) is performed. The \fI\-\-dry\-run\fR
+option has become a common feature of many command line utilities (e.g.
+the Unix 'patch' command), not just those from this package.
+.br
+Note that most hyphenated option names in this package also can be given
+with an underscore rather than a hyphen (e.g.  \fI\-\-dry_run\fR).
 .TP
 \fB\-e\fR, \fB\-\-enumerate\fR
 some utilities (e.g. sg_ses and sg_vpd) store a lot of information in
@@ -431,24 +576,24 @@ usually sent to stderr so as to not interfere with the output from this
 option.
 .br
 Some utilities that consume data to send to the \fIDEVICE\fR along with the
-SCSI command, use this option. Alernatively the \fI\-\-in=FN\fR option causes
+SCSI command, use this option. Alternatively the \fI\-\-in=FN\fR option causes
 \fIDEVICE\fR to be ignored and the response data (to be decoded) fetched
 from a file named \fIFN\fR. In these cases this option may indicate that
 binary data can be read from stdin or from a nominated file (e.g. \fIFN\fR).
 .TP
-\fB\-t\fR, \fB\-\-timeout\fR=\fISEC\fR
+\fB\-t\fR, \fB\-\-timeout\fR=\fISECS\fR
 utilities that issue potentially long\-running SCSI commands often have a
-\fI\-\-timeout=SEC\fR option. This typically instructs the operating system
+\fI\-\-timeout=SECS\fR option. This typically instructs the operating system
 to abort the SCSI command in question once the timeout expires. Aborting
 SCSI commands is typically a messy business and in the case of format like
 commands may leave the device in a "format corrupt" state requiring another
-long\-running re\-initialization command to be sent. The argument, \fISEC\fR,
+long\-running re\-initialization command to be sent. The argument, \fISECS\fR,
 is usually in seconds and the short form of the option may be something
 other than \fI\-t\fR since the timeout option was typically added later as
 storage devices grew in size and initialization commands took longer. Since
 many utilities had relatively long internal command timeouts before this
 option was introduced, the actual command timeout given to the operating
-systems is the higher of the internal timeout and \fISEC\fR.
+systems is the higher of the internal timeout and \fISECS\fR.
 .br
 Many long running SCSI commands have an IMMED bit which causes the command
 to finish relatively quickly but the initialization process to continue. In
@@ -483,15 +628,15 @@ strings appended directly after the number to which they apply:
 .br
    k K KiB     *1024
 .br
-   KB          *1000
+   KB kB       *1000
 .br
    m M MiB     *1048576
 .br
-   MB          *1000000
+   MB mB       *1000000
 .br
    g G GiB     *(2^30)
 .br
-   GB          *(10^9)
+   GB gB       *(10^9)
 .br
    t T TiB     *(2^40)
 .br
@@ -547,14 +692,21 @@ the 'utils' subdirectory.
 There is a web page discussing this package at
 http://sg.danny.cz/sg/sg3_utils.html . The device naming used by this
 package on various operating systems is discussed at:
-http://sg.danny.cz/sg/device_name.html .
+http://sg.danny.cz/sg/device_name.html . There is a git code mirror at
+https://github.com/hreinecke/sg3_utils . The principle code repository
+uses subversion and is on the author's equipment. The author keeps track
+of this via the subversion revision number which is an ascending integer
+(currently at 774 for this package). The github mirror gets updated
+periodically from the author's repository. Depending on the time of
+update, the above Downloads section at sg.danny.cz may be more up to
+date than the github mirror.
 .SH AUTHORS
 Written by Douglas Gilbert. Some utilities have been contributed, see the
 CREDITS file and individual source files (in the 'src' directory).
 .SH "REPORTING BUGS"
 Report bugs to <dgilbert at interlog dot com>.
 .SH COPYRIGHT
-Copyright \(co 1999\-2017 Douglas Gilbert
+Copyright \(co 1999\-2018 Douglas Gilbert
 .br
 Some utilities are distributed under a GPL version 2 license while
 others, usually more recent ones, are under a FreeBSD license. The files

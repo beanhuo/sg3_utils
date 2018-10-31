@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017 Douglas Gilbert.
+ * Copyright (c) 2016-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -12,6 +12,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <string.h>
+#include <errno.h>
 #include <ctype.h>
 #include <getopt.h>
 #define __STDC_FORMAT_MACROS 1
@@ -21,6 +22,7 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_lib_data.h"
 #include "sg_pt.h"
@@ -35,7 +37,7 @@
  * and decodes the response. Based on spc5r08.pdf
  */
 
-static const char * version_str = "1.05 20171010";
+static const char * version_str = "1.11 20180523";
 
 #define MAX_RATTR_BUFF_LEN (1024 * 1024)
 #define DEF_RATTR_BUFF_LEN (1024 * 8)
@@ -65,6 +67,8 @@ struct opts_t {
     bool enumerate;
     bool do_raw;
     bool o_readonly;
+    bool verbose_given;
+    bool version_given;
     int elem_addr;
     int filter;
     int fai;
@@ -240,10 +244,10 @@ sg_ll_read_attr(int sg_fd, void * resp, int * residp, bool noisy,
                 const struct opts_t * op)
 {
     int k, ret, res, sense_cat;
-    unsigned char ra_cdb[SG_READ_ATTRIBUTE_CMDLEN] =
+    uint8_t ra_cdb[SG_READ_ATTRIBUTE_CMDLEN] =
           {SG_READ_ATTRIBUTE_CMD, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,
            0, 0, 0, 0};
-    unsigned char sense_b[SENSE_BUFF_LEN];
+    uint8_t sense_b[SENSE_BUFF_LEN];
     struct sg_pt_base * ptvp;
 
     ra_cdb[1] = 0x1f & op->sa;
@@ -272,12 +276,12 @@ sg_ll_read_attr(int sg_fd, void * resp, int * residp, bool noisy,
     }
     set_scsi_pt_cdb(ptvp, ra_cdb, sizeof(ra_cdb));
     set_scsi_pt_sense(ptvp, sense_b, sizeof(sense_b));
-    set_scsi_pt_data_in(ptvp, (unsigned char *)resp, op->maxlen);
+    set_scsi_pt_data_in(ptvp, (uint8_t *)resp, op->maxlen);
     res = do_scsi_pt(ptvp, sg_fd, DEF_PT_TIMEOUT, op->verbose);
     ret = sg_cmds_process_resp(ptvp, "read attribute", res, op->maxlen,
                                sense_b, noisy, op->verbose, &sense_cat);
     if (-1 == ret)
-        ;
+        ret = sg_convert_errno(get_scsi_pt_os_err(ptvp));
     else if (-2 == ret) {
         switch (sense_cat) {
         case SG_LIB_CAT_RECOVERED:
@@ -297,11 +301,11 @@ sg_ll_read_attr(int sg_fd, void * resp, int * residp, bool noisy,
 }
 
 static void
-dStrRaw(const char* str, int len)
+dStrRaw(const char * str, int len)
 {
     int k;
 
-    for (k = 0 ; k < len; ++k)
+    for (k = 0; k < len; ++k)
         printf("%c", str[k]);
 }
 
@@ -371,15 +375,16 @@ enum_sa_acrons(void)
  * stdin). If reading ASCII hex then there should be either one entry per
  * line or a comma, space or tab separated list of bytes. If no_space is
  * set then a string of ACSII hex digits is expected, 2 per byte. Everything
- * from and including a '#' on a line is ignored. Returns 0 if ok, or 1 if
- * error. */
+ * from and including a '#' on a line is ignored. Returns 0 if ok, or error
+ * code. */
 static int
 f2hex_arr(const char * fname, bool as_binary, bool no_space,
           uint8_t * mp_arr, int * mp_arr_len, int max_arr_len)
 {
     bool split_line, has_stdin;
-    int fn_len, in_len, k, j, m, fd;
+    int fn_len, in_len, k, j, m, fd, err;
     int off = 0;
+    int ret = SG_LIB_SYNTAX_ERROR;
     unsigned int h;
     const char * lcp;
     FILE * fp;
@@ -387,10 +392,10 @@ f2hex_arr(const char * fname, bool as_binary, bool no_space,
     char carry_over[4];
 
     if ((NULL == fname) || (NULL == mp_arr) || (NULL == mp_arr_len))
-        return 1;
+        return SG_LIB_LOGIC_ERROR;
     fn_len = strlen(fname);
     if (0 == fn_len)
-        return 1;
+        return SG_LIB_SYNTAX_ERROR;
     has_stdin = ((1 == fn_len) && ('-' == fname[0]));  /* read from stdin */
     if (as_binary) {
         if (has_stdin) {
@@ -400,9 +405,10 @@ f2hex_arr(const char * fname, bool as_binary, bool no_space,
         } else {
             fd = open(fname, O_RDONLY);
             if (fd < 0) {
+                err = errno;
                 pr2serr("unable to open binary file %s: %s\n", fname,
-                         safe_strerror(errno));
-                return 1;
+                         safe_strerror(err));
+                return sg_convert_errno(err);
             } else if (sg_set_binary_mode(fd) < 0)
                 perror("sg_set_binary_mode");
         }
@@ -410,12 +416,15 @@ f2hex_arr(const char * fname, bool as_binary, bool no_space,
         if (k <= 0) {
             if (0 == k)
                 pr2serr("read 0 bytes from binary file %s\n", fname);
-            else
+            else {
+                err = errno;
                 pr2serr("read from binary file %s: %s\n", fname,
-                        safe_strerror(errno));
+                        safe_strerror(err));
+                ret = sg_convert_errno(err);
+            }
             if (! has_stdin)
                 close(fd);
-            return 1;
+            return ret;
         }
         *mp_arr_len = k;
         if (! has_stdin)
@@ -549,7 +558,7 @@ bad:
 /* Returns 1 if 'bp' all 0xff bytes, returns 2 is all 0xff bytes apart
  * from last being 0xfe; otherwise returns 0. */
 static int
-all_ffs_or_last_fe(const unsigned char * bp, int len)
+all_ffs_or_last_fe(const uint8_t * bp, int len)
 {
     for ( ; len > 0; ++bp, --len) {
         if (*bp < 0xfe)
@@ -597,7 +606,7 @@ attr_id_lookup(unsigned int id, const struct attr_name_info_t ** anipp,
 }
 
 static void
-decode_attr_list(const unsigned char * alp, int len, bool supported,
+decode_attr_list(const uint8_t * alp, int len, bool supported,
                  const struct opts_t * op)
 {
     int id;
@@ -611,7 +620,7 @@ decode_attr_list(const unsigned char * alp, int len, bool supported,
     else if (0 == op->quiet)
         printf("%sttribute list:\n", leadin);
     if (op->do_hex) {
-        dStrHex((const char *)alp, len, 0);
+        hex2stdout(alp, len, 0);
         return;
     }
     for ( ; len > 0; alp += 2, len -= 2) {
@@ -634,12 +643,12 @@ decode_attr_list(const unsigned char * alp, int len, bool supported,
 }
 
 static void
-helper_full_attr(const unsigned char * alp, int len, int id,
+helper_full_attr(const uint8_t * alp, int len, int id,
                  const struct attr_name_info_t * anip,
                  const struct opts_t * op)
 {
     int k;
-    const unsigned char * bp;
+    const uint8_t * bp;
 
     if (op->verbose)
         printf("[r%c] ", (0x80 & alp[2]) ? 'o' : 'w');
@@ -658,7 +667,7 @@ helper_full_attr(const unsigned char * alp, int len, int id,
                 printf("%" PRIx64, sg_get_unaligned_be(len - 5, alp + 5));
             else {
                 printf("\n");
-                dStrHex((const char *)(alp + 5), len - 5, 0);
+                hex2stdout((alp + 5), len - 5, 0);
             }
         }
         break;
@@ -674,7 +683,7 @@ helper_full_attr(const unsigned char * alp, int len, int id,
                 printf("%" PRIx64, sg_get_unaligned_be(len - 5, alp + 5));
             else {
                 printf("\n");
-                dStrHex((const char *)(alp + 5), len - 5, 0);
+                hex2stdout(alp + 5, len - 5, 0);
             }
         }
         break;
@@ -757,13 +766,13 @@ helper_full_attr(const unsigned char * alp, int len, int id,
     default:
         pr2serr("%s: unknown attribute id: 0x%x\n", __func__, id);
         printf("  In hex:\n");
-        dStrHex((const char *)alp, len, 0);
+        hex2stdout(alp, len, 0);
         break;
     }
 }
 
 static void
-decode_attr_vals(const unsigned char * alp, int len, const struct opts_t * op)
+decode_attr_vals(const uint8_t * alp, int len, const struct opts_t * op)
 {
     int bump, id, alen;
     uint64_t ull;
@@ -778,7 +787,7 @@ decode_attr_vals(const unsigned char * alp, int len, const struct opts_t * op)
         if (0 == op->quiet)
             printf("Attribute values:\n");
         if (op->do_hex) {       /* only expect -HH to get through here */
-            dStrHex((const char *)alp, len, 0);
+            hex2stdout(alp, len, 0);
             return;
         }
     }
@@ -823,7 +832,7 @@ decode_attr_vals(const unsigned char * alp, int len, const struct opts_t * op)
                     helper_full_attr(alp, bump, id, anip, op);
                 else {
                     printf("\n");
-                    dStrHex((const char *)(alp + 5), alen, 0);
+                    hex2stdout(alp + 5, alen, 0);
                 }
            } else {
                 if (2 == anip->process)
@@ -843,7 +852,7 @@ decode_attr_vals(const unsigned char * alp, int len, const struct opts_t * op)
                 printf("Attribute id lookup failed, in hex:\n");
             else
                 printf("\n");
-            dStrHex((const char *)(alp + 5), alen, 0);
+            hex2stdout(alp + 5, alen, 0);
         }
     }
     if (op->verbose && (len > 0) && (len <= 4))
@@ -852,10 +861,10 @@ decode_attr_vals(const unsigned char * alp, int len, const struct opts_t * op)
 }
 
 static void
-decode_all_sa_s(const unsigned char * rabp, int len, const struct opts_t * op)
+decode_all_sa_s(const uint8_t * rabp, int len, const struct opts_t * op)
 {
     if (op->do_hex && (2 != op->do_hex)) {
-        dStrHex((const char *)rabp, len, ((1 == op->do_hex) ? 1 : -1));
+        hex2stdout(rabp, len, ((1 == op->do_hex) ? 1 : -1));
         return;
     }
     switch (op->sa) {
@@ -889,7 +898,7 @@ decode_all_sa_s(const unsigned char * rabp, int len, const struct opts_t * op)
         break;
     case RA_SMC2_SA:
         printf("Used by SMC-2, not information, output in hex:\n");
-        dStrHex((const char *)rabp, len, 0);
+        hex2stdout(rabp, len, 0);
         break;
     case RA_SUP_ATTR_SA:
         decode_attr_list(rabp + 4, len - 4, true, op);
@@ -897,7 +906,7 @@ decode_all_sa_s(const unsigned char * rabp, int len, const struct opts_t * op)
     default:
         printf("Unrecognized service action [0x%x], response in hex:\n",
                op->sa);
-        dStrHex((const char *)rabp, len, 0);
+        hex2stdout(rabp, len, 0);
         break;
     }
 }
@@ -905,12 +914,14 @@ decode_all_sa_s(const unsigned char * rabp, int len, const struct opts_t * op)
 int
 main(int argc, char * argv[])
 {
-    int sg_fd, res, c, len, resid, rlen, in_len;
+    int sg_fd, res, c, len, resid, rlen;
     unsigned int ra_len;
+    int in_len = 0;
     int ret = 0;
     const char * device_name = NULL;
     const char * fname = NULL;
-    unsigned char * rabp = NULL;
+    uint8_t * rabp = NULL;
+    uint8_t * free_rabp = NULL;
     struct opts_t opts;
     struct opts_t * op;
     char b[80];
@@ -1013,11 +1024,12 @@ main(int argc, char * argv[])
             }
             break;
         case 'v':
+            op->verbose_given = true;;
             ++op->verbose;
             break;
         case 'V':
-            pr2serr("version: %s\n", version_str);
-            return 0;
+            op->version_given = true;;
+            break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
             usage();
@@ -1036,6 +1048,26 @@ main(int argc, char * argv[])
             return SG_LIB_SYNTAX_ERROR;
         }
     }
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (op->verbose_given && op->version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        op->verbose_given = false;
+        op->version_given = false;
+        op->verbose = 0;
+    } else if (! op->verbose_given) {
+        pr2serr("set '-vv'\n");
+        op->verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", op->verbose);
+#else
+    if (op->verbose_given && op->version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (op->version_given) {
+        pr2serr("version: %s\n", version_str);
+        return 0;
+    }
 
     if (op->enumerate) {
         enum_attributes();
@@ -1051,19 +1083,17 @@ main(int argc, char * argv[])
 
     if (0 == op->maxlen)
         op->maxlen = DEF_RATTR_BUFF_LEN;
-    rabp = (unsigned char *)calloc(1, op->maxlen);
+    rabp = (uint8_t *)sg_memalign(op->maxlen, 0, &free_rabp, op->verbose > 3);
     if (NULL == rabp) {
-        pr2serr("unable to calloc %d bytes\n", op->maxlen);
-        return SG_LIB_CAT_OTHER;
+        pr2serr("unable to sg_memalign %d bytes\n", op->maxlen);
+        return sg_convert_errno(ENOMEM);
     }
 
     if (NULL == device_name) {
         if (fname) {
-            if (f2hex_arr(fname, op->do_raw, 0 /* no space */, rabp,
-                          &in_len, op->maxlen)) {
-                ret = SG_LIB_FILE_ERROR;
+            if ((ret = f2hex_arr(fname, op->do_raw, 0 /* no space */, rabp,
+                                 &in_len, op->maxlen)))
                 goto clean_up;
-            }
             if (op->do_raw)
                 op->do_raw = false;    /* can interfere on decode */
             if (in_len < 4) {
@@ -1093,7 +1123,7 @@ main(int argc, char * argv[])
     if (sg_fd < 0) {
         pr2serr("open error: %s: %s\n", device_name,
                 safe_strerror(-sg_fd));
-        ret = SG_LIB_FILE_ERROR;
+        ret = sg_convert_errno(-sg_fd);
         goto clean_up;
     }
 
@@ -1138,10 +1168,15 @@ close_then_end:
     if (res < 0) {
         pr2serr("close error: %s\n", safe_strerror(-res));
         if (0 == ret)
-            ret = SG_LIB_FILE_ERROR;
+            ret = sg_convert_errno(-res);
     }
 clean_up:
-    if (rabp)
-        free(rabp);
+    if (free_rabp)
+        free(free_rabp);
+    if (0 == op->verbose) {
+        if (! sg_if_can2stderr("sg_read_attr failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' or '-vv' for "
+                    "more information\n");
+    }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }

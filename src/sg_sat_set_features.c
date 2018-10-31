@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006-2017 Douglas Gilbert.
+ * Copyright (c) 2006-2018 Douglas Gilbert.
  * All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the BSD_LICENSE file.
@@ -18,6 +18,7 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
 #include "sg_lib.h"
 #include "sg_cmds_basic.h"
 #include "sg_cmds_extra.h"
@@ -40,7 +41,7 @@
 
 #define SAT_ATA_PASS_THROUGH16 0x85
 #define SAT_ATA_PASS_THROUGH16_LEN 16
-#define SAT_ATA_PASS_THROUGH12 0xa1     /* clashes with MMC BLANK comand */
+#define SAT_ATA_PASS_THROUGH12 0xa1     /* clashes with MMC BLANK command */
 #define SAT_ATA_PASS_THROUGH12_LEN 12
 #define SAT_ATA_RETURN_DESC 9  /* ATA Return (sense) Descriptor */
 #define ASCQ_ATA_PT_INFO_AVAILABLE 0x1d
@@ -49,11 +50,12 @@
 
 #define DEF_TIMEOUT 20
 
-static const char * version_str = "1.14 20171010";
+static const char * version_str = "1.18 20180628";
 
 static struct option long_options[] = {
     {"count", required_argument, 0, 'c'},
     {"ck_cond", no_argument, 0, 'C'},
+    {"ck-cond", no_argument, 0, 'C'},
     {"extended", no_argument, 0, 'e'},
     {"feature", required_argument, 0, 'f'},
     {"help", no_argument, 0, 'h'},
@@ -121,12 +123,12 @@ do_set_features(int sg_fd, int feature, int count, uint64_t lba,
     int resid = 0;
     int sb_sz;
     struct sg_scsi_sense_hdr ssh;
-    unsigned char sense_buffer[64];
-    unsigned char ata_return_desc[16];
-    unsigned char apt_cdb[SAT_ATA_PASS_THROUGH16_LEN] =
+    uint8_t sense_buffer[64];
+    uint8_t ata_return_desc[16];
+    uint8_t apt_cdb[SAT_ATA_PASS_THROUGH16_LEN] =
                 {SAT_ATA_PASS_THROUGH16, 0, 0, 0, 0, 0, 0, 0,
                  0, 0, 0, 0, 0, 0, 0, 0};
-    unsigned char apt12_cdb[SAT_ATA_PASS_THROUGH12_LEN] =
+    uint8_t apt12_cdb[SAT_ATA_PASS_THROUGH12_LEN] =
                 {SAT_ATA_PASS_THROUGH12, 0, 0, 0, 0, 0, 0, 0,
                  0, 0, 0, 0};
 
@@ -303,7 +305,10 @@ main(int argc, char * argv[])
     bool ck_cond = false;
     bool extend = false;
     bool rdonly = false;
-    int sg_fd, c, ret, res;
+    bool verbose_given = false;
+    bool version_given = false;
+    int c, ret, res;
+    int sg_fd = -1;
     int count = 0;
     int feature = 0;
     int verbose = 0;
@@ -362,11 +367,12 @@ main(int argc, char * argv[])
             rdonly = true;
             break;
         case 'v':
+            verbose_given = true;
             ++verbose;
             break;
         case 'V':
-            pr2serr("version: %s\n", version_str);
-            return 0;
+            version_given = true;
+            break;
         default:
             pr2serr("unrecognised option code 0x%x ??\n", c);
             usage();
@@ -386,8 +392,29 @@ main(int argc, char * argv[])
         }
     }
 
+#ifdef DEBUG
+    pr2serr("In DEBUG mode, ");
+    if (verbose_given && version_given) {
+        pr2serr("but override: '-vV' given, zero verbose and continue\n");
+        verbose_given = false;
+        version_given = false;
+        verbose = 0;
+    } else if (! verbose_given) {
+        pr2serr("set '-vv'\n");
+        verbose = 2;
+    } else
+        pr2serr("keep verbose=%d\n", verbose);
+#else
+    if (verbose_given && version_given)
+        pr2serr("Not in DEBUG mode, so '-vV' has no special action\n");
+#endif
+    if (version_given) {
+        pr2serr("version: %s\n", version_str);
+        return 0;
+    }
+
     if (NULL == device_name) {
-        pr2serr("missing device name!\n");
+        pr2serr("Missing device name!\n\n");
         usage();
         return 1;
     }
@@ -408,19 +435,29 @@ main(int argc, char * argv[])
     }
 
     if ((sg_fd = sg_cmds_open_device(device_name, rdonly, verbose)) < 0) {
-        pr2serr("error opening file: %s: %s\n", device_name,
-                safe_strerror(-sg_fd));
-        return SG_LIB_FILE_ERROR;
+        if (verbose)
+            pr2serr("error opening file: %s: %s\n", device_name,
+                    safe_strerror(-sg_fd));
+        ret = sg_convert_errno(-sg_fd);
+        goto fini;
     }
 
     ret = do_set_features(sg_fd, feature, count, lba, cdb_len, ck_cond,
                           extend, verbose);
 
-    res = sg_cmds_close_device(sg_fd);
-    if (res < 0) {
-        pr2serr("close error: %s\n", safe_strerror(-res));
-        if (0 == ret)
-            return SG_LIB_FILE_ERROR;
+fini:
+    if (sg_fd >= 0) {
+        res = sg_cmds_close_device(sg_fd);
+        if (res < 0) {
+            pr2serr("close error: %s\n", safe_strerror(-res));
+            if (0 == ret)
+                ret = sg_convert_errno(-res);
+        }
+    }
+    if (0 == verbose) {
+        if (! sg_if_can2stderr("sg_sat_set_feature failed: ", ret))
+            pr2serr("Some error occurred, try again with '-v' "
+                    "or '-vv' for more information\n");
     }
     return (ret >= 0) ? ret : SG_LIB_CAT_OTHER;
 }
