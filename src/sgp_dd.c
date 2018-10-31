@@ -1121,6 +1121,11 @@ process_flags(const char * arg, struct flags_t * fp)
     return 0;
 }
 
+void
+thread_exit_handler(int sig)
+{
+    pthread_exit(0);
+}
 
 #define STR_SZ 1024
 #define INOUTF_SZ 512
@@ -1147,6 +1152,14 @@ main(int argc, char * argv[])
     int in_sect_sz, out_sect_sz, status, n, flags;
     void * vp;
     char ebuff[EBUFF_SZ];
+#ifndef  HAVE_PTHREAD_CANCEL
+    struct sigaction actions;
+    memset(&actions, 0, sizeof(actions));
+    sigemptyset(&actions.sa_mask);
+    actions.sa_flags = 0;
+    actions.sa_handler = thread_exit_handler;
+    sigaction(SIGUSR1,&actions,NULL);
+#endif
 
     memset(&rcoll, 0, sizeof(Rq_coll));
     rcoll.bpt = DEF_BLOCKS_PER_TRANSFER;
@@ -1629,7 +1642,11 @@ main(int argc, char * argv[])
         }
     }
 
+#ifdef HAVE_PTHREAD_CANCEL
     status = pthread_cancel(sig_listen_thread_id);
+#else
+    status = pthread_kill(sig_listen_thread_id, SIGUSR1);
+#endif
     if (0 != status) err_exit(status, "pthread_cancel");
     if (STDIN_FILENO != rcoll.infd)
         close(rcoll.infd);
