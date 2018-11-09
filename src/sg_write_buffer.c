@@ -195,6 +195,7 @@ main(int argc, char * argv[])
     const char * device_name = NULL;
     const char * file_name = NULL;
     unsigned char * dop = NULL;
+    unsigned char * read_buf= NULL;
     char * cp;
     const struct mode_s * mp;
     char ebuff[EBUFF_SZ];
@@ -394,6 +395,33 @@ main(int argc, char * argv[])
                     }
                 }
             }
+	if (infd == STDIN_FILENO) {
+		if (NULL == (read_buf = (unsigned char *)malloc(DEF_XFER_LEN))) {
+			pr2serr(ME "out of memory\n");
+			ret = SG_LIB_SYNTAX_ERROR;
+			goto err_out;
+		}
+		res = read(infd, read_buf, DEF_XFER_LEN);
+		if (res < 0) {
+			snprintf(ebuff, EBUFF_SZ, ME "couldn't read from STDIN");
+			perror(ebuff);
+			ret = SG_LIB_FILE_ERROR;
+			goto err_out;
+		}
+		char * pch;
+		int val = 0;
+		res = 0;
+		pch = strtok(read_buf, ",. ");
+		while (pch != NULL) {
+			printf("read %s ", pch);
+			val = sg_get_num_nomult(pch);
+			if (val > 0 && val < 255) {
+				dop[res] = val;
+				res++;
+			}
+			pch = strtok(NULL, ",. ");
+		}
+	} else {
             res = read(infd, dop, wb_len);
             if (res < 0) {
                 snprintf(ebuff, EBUFF_SZ, ME "couldn't read from %s",
@@ -404,6 +432,7 @@ main(int argc, char * argv[])
                 ret = SG_LIB_FILE_ERROR;
                 goto err_out;
             }
+	}
             if (res < wb_len) {
                 if (wb_len_given) {
                     pr2serr("tried to read %d bytes from %s, got %d bytes\n",
@@ -472,6 +501,8 @@ main(int argc, char * argv[])
 err_out:
     if (dop)
         free(dop);
+    if (read_buf)
+	free(read_buf);
     res = sg_cmds_close_device(sg_fd);
     if (res < 0) {
         pr2serr("close error: %s\n", safe_strerror(-res));
